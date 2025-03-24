@@ -17,6 +17,7 @@
 #include "aml_wq.h"
 #include "reg_ipc_app.h"
 #include "aml_compat.h"
+#include "aml_recy.h"
 
 /******************************************************************************
  * Utils functions
@@ -319,7 +320,7 @@ void aml_txq_flush(struct aml_hw *aml_hw, struct aml_txq *txq)
     }
 
     if (pushed)
-        dev_warn(aml_hw->dev, "TXQ[%d]: %d skb still pushed to the FW",
+        PRINT("warning TXQ[%d]: %d skb still pushed to the FW",
                  txq->idx, pushed);
 }
 
@@ -724,24 +725,27 @@ static bool aml_txq_drop_ap_vif_old_traffic(struct aml_vif *vif)
 
 #ifdef CONFIG_AML_RECOVERY
         spin_lock_bh(&aml_recy->aml_hw->cmd_mgr.lock);
-        if (!aml_recy->reason) {
-            aml_wq = aml_wq_alloc(1);
-            if (!aml_wq) {
-                AML_INFO("alloc wq out of memory");
-            } else {
-                aml_recy->reason = RECY_REASON_CODE_TX_TIMEOUT;
-                aml_wq->id = AML_WQ_RECY;
-                memcpy(aml_wq->data, &type, 1);
-                aml_wq_add(aml_recy->aml_hw, aml_wq);
-           }
+        if (aml_bus_type != USB_MODE) {
+            if (!aml_recy->reason) {
+                aml_wq = aml_wq_alloc(1);
+                if (!aml_wq) {
+                    AML_INFO("alloc wq out of memory");
+                } else {
+                    aml_recy->reason = RECY_REASON_CODE_TX_TIMEOUT;
+                    aml_wq->id = AML_WQ_RECY;
+                    memcpy(aml_wq->data, &type, 1);
+                    aml_wq_add(aml_recy->aml_hw, aml_wq);
+               }
+            }
         }
         spin_unlock_bh(&aml_recy->aml_hw->cmd_mgr.lock);
 #endif
     }
-    spin_lock_bh(&vif->vif_lock);
+
     /* protect union struct vif->ap.sta_list was overwritten
      * by vif->sta.ap = NULL when aml_cfg80211_change_iface
      */
+    spin_lock_bh(&vif->vif_lock);
     if (vif->ap.sta_list.next) {
         list_for_each_entry_safe(sta, tmp, &vif->ap.sta_list, list) {
             struct aml_txq *txq;
@@ -787,15 +791,15 @@ static bool aml_txq_drop_sta_vif_old_traffic(struct aml_vif *vif)
         }
     }
 
+    spin_lock_bh(&vif->vif_lock);
     if (vif->sta.ap) {
-        spin_lock_bh(&vif->vif_lock);
         foreach_sta_txq_safe(vif->sta.ap, txq, tid, vif->aml_hw) {
             pkt_queued |= aml_txq_drop_old_traffic(txq, vif->aml_hw,
                                                     AML_TXQ_MAX_QUEUE_JIFFIES,
                                                     &pkt_dropped);
         }
-        spin_unlock_bh(&vif->vif_lock);
     }
+    spin_unlock_bh(&vif->vif_lock);
 
     if (pkt_dropped) {
         struct aml_wq *aml_wq;
@@ -812,16 +816,18 @@ static bool aml_txq_drop_sta_vif_old_traffic(struct aml_vif *vif)
         }
 #ifdef CONFIG_AML_RECOVERY
         spin_lock_bh(&aml_recy->aml_hw->cmd_mgr.lock);
-        if (!aml_recy->reason) {
-            aml_wq = aml_wq_alloc(1);
-            if (!aml_wq) {
-                AML_INFO("alloc wq out of memory");
-            } else {
-                aml_recy->reason = RECY_REASON_CODE_TX_TIMEOUT;
-                aml_wq->id = AML_WQ_RECY;
-                memcpy(aml_wq->data, &type, 1);
-                aml_wq_add(aml_recy->aml_hw, aml_wq);
-           }
+        if (aml_bus_type != USB_MODE) {
+            if (!aml_recy->reason) {
+                aml_wq = aml_wq_alloc(1);
+                if (!aml_wq) {
+                    AML_INFO("alloc wq out of memory");
+                } else {
+                    aml_recy->reason = RECY_REASON_CODE_TX_TIMEOUT;
+                    aml_wq->id = AML_WQ_RECY;
+                    memcpy(aml_wq->data, &type, 1);
+                    aml_wq_add(aml_recy->aml_hw, aml_wq);
+               }
+            }
         }
         spin_unlock_bh(&aml_recy->aml_hw->cmd_mgr.lock);
 #endif
@@ -842,6 +848,12 @@ static void aml_txq_cleanup_timer_cb(struct timer_list *t)
     struct aml_hw *aml_hw = from_timer(aml_hw, t, txq_cleanup);
     struct aml_vif *vif, *vif_tmp;
     bool pkt_queue = false;
+
+    if (aml_hw->state != WIFI_SUSPEND_STATE_NONE)
+    {
+        AML_INFO("drv is in suspend, do not clean up txq\n");
+        return;
+    }
 
     list_for_each_entry_safe(vif, vif_tmp, &aml_hw->vifs, list) {
         switch (AML_VIF_TYPE(vif)) {
@@ -1463,6 +1475,11 @@ void aml_txq_confirm_any(struct aml_hw *aml_hw, struct aml_txq *txq,
 
     if (txq->pkt_pushed[user])
         txq->pkt_pushed[user]--;
+
+    if (hwq->credits[user] > hwq->size) {
+        AML_INFO("hwq->credits %d, aml_hw->stats->cfm_balance[hw1->id] %d\n", hwq->credits[user], aml_hw->stats->cfm_balance[hwq->id]);
+        return;
+    }
 
     hwq->credits[user]++;
     hwq->need_processing = true;

@@ -31,6 +31,9 @@
 #include "wifi_intf_addr.h"
 #include "chip_pmu_reg.h"
 #include "wifi_top_addr.h"
+#include "aml_bt_notify.h"
+#include "usb_common.h"
+#include "aml_platform.h"
 
 #ifdef CONFIG_AML_RECOVERY
 
@@ -39,6 +42,7 @@ static int recy_dbg = 1;
 
 extern struct aml_bus_state_detect bus_state_detect;
 extern struct aml_pm_type g_wifi_pm;
+extern int update_rxptr;
 
 extern int g_cali_cfg_done;
 extern unsigned int trace_flag;
@@ -261,23 +265,57 @@ int aml_recy_fw_reload_for_usb_sdio(struct aml_hw *aml_hw)
 Try_again:
 
     aml_platform_off(aml_hw, NULL);
+
+    if (aml_bus_type != USB_MODE) {
+        u32 regval_cpu = 0;
+        regval_cpu = AML_REG_READ(aml_hw->plat, AML_ADDR_AON, RG_PMU_A22);
+        regval_cpu |= PHY_RESET | MAC_RESET;
+        AML_REG_WRITE(regval_cpu, aml_hw->plat, AML_ADDR_AON, RG_PMU_A22);
+        RECY_DBG("phy&mac reset");
+    }
+
+#ifdef CONFIG_AML_SDIO_USB_FW_REORDER
     if (aml_bus_type != PCIE_MODE) {
         aml_clear_reorder_list();
     }
+#endif
     if (aml_bus_type == USB_MODE) {
+        RECY_DBG("reload usb reset");
         bus_state_detect.bus_reset_ongoing = 1;
+        #if 0
         aml_usb_reset();
-
+        #else
+        bus_state_detect.bus_reset_ongoing = 0;
+        bus_state_detect.bus_err = 0;
+        #endif
         /* realloc usb_dev in function@auc_probe when usb do reset, it need to reinit data */
-        aml_hw->plat->usb_dev = g_udev;
-        dev_set_drvdata(&aml_hw->plat->usb_dev->dev, aml_hw);
+        dev_set_drvdata(&g_udev->dev, aml_hw);
         aml_hw->dev = aml_platform_get_dev(aml_hw->plat);
         set_wiphy_dev(aml_hw->wiphy, aml_hw->dev);
         bus_state_detect.bus_reset_ongoing = 0;
     }
+#ifdef SDIO_MODE_ON
     if ((aml_bus_type == SDIO_MODE) && ((bus_state_detect.bus_err == 1) || (try_cnt > 1))) {
-       aml_sdio_reset();
+        struct sdio_func *func;
+        aml_sdio_reset();
+        func = aml_priv_to_func(SDIO_FUNC7);
+        dev_set_drvdata(&func->dev, aml_hw);
     }
+#endif
+    if (bus_state_detect.is_recy_ongoing) {
+        if (aml_hw->plat->disable)
+            aml_hw->plat->disable(aml_hw);
+    }
+
+    if (bus_state_detect.bus_err == 1 || atomic_read(&g_wifi_pm.is_shut_down)
+        || atomic_read(&g_wifi_pm.bus_suspend_cnt)) {
+        RECY_DBG("bus no ready after recovery: bus_err(%d),shut_down(%d),bus_suspend_cnt(%d)",
+            bus_state_detect.bus_err, atomic_read(&g_wifi_pm.is_shut_down),
+            atomic_read(&g_wifi_pm.bus_suspend_cnt));
+        ret = -1;
+        goto out;
+    }
+
     if (aml_sdio_platform_on(aml_hw, NULL)) {
         RECY_DBG("reload fw platform on failed");
         ret = -1;
@@ -457,6 +495,22 @@ static int aml_recy_vif_reset(struct aml_hw *aml_hw)
 
         spin_lock_bh(&aml_hw->cb_lock);
         aml_vif->up = false;
+
+        if (AML_VIF_TYPE(aml_vif) == NL80211_IFTYPE_STATION) {
+            struct wireless_dev *wdev = dev->ieee80211_ptr;
+            if ((wdev) && (aml_connect_flags_chk(aml_vif, AML_DISCONNECT))) {
+                #if defined(IEEE80211_MLD_MAX_NUM_LINKS)
+                if (wdev->connected || wdev->u.client.ssid_len)
+                #else
+                if (wdev->current_bss || wdev->ssid_len)
+                #endif
+                {
+                    AML_INFO("wifi is disconnect, and state mismatch with upper layer, need disconnect to kernel\n");
+                    cfg80211_disconnected(dev, 0, NULL, 0,false, GFP_ATOMIC);
+                }
+            }
+        }
+
         if (AML_VIF_TYPE(aml_vif) == NL80211_IFTYPE_STATION ||
             AML_VIF_TYPE(aml_vif) == NL80211_IFTYPE_P2P_CLIENT)
             aml_connect_flags_clr(aml_vif, AML_GETTING_IP);
@@ -467,7 +521,7 @@ static int aml_recy_vif_reset(struct aml_hw *aml_hw)
                 netif_tx_stop_all_queues(dev);
                 netif_carrier_off(dev);
                 if (aml_vif->sta.ap) {
-                    aml_txq_sta_deinit(aml_hw, aml_vif->sta.ap);
+                    aml_sta_deinit(aml_hw, aml_vif->sta.ap);
                     aml_txq_tdls_vif_deinit(aml_vif);
                     aml_dbgfs_unregister_sta(aml_hw, aml_vif->sta.ap);
                 }
@@ -577,6 +631,7 @@ static int aml_recy_vif_restart(struct aml_hw *aml_hw)
     return 0;
 }
 
+extern int notify_bt_event(int event);
 int aml_recy_doit(struct aml_hw *aml_hw)
 {
     int ret;
@@ -589,18 +644,19 @@ int aml_recy_doit(struct aml_hw *aml_hw)
     scnprintf(fbuf, sizeof(fbuf), "recovery reason: 0x%02x(%s)\n", aml_recy->reason, aml_recy_reason_code2str[aml_recy->reason]);
     AML_INFO("%s", fbuf);
     if (aml_bus_type != PCIE_MODE)
-#ifdef CONFIG_AML_DEBUGFS
         aml_send_err_info_to_diag(fbuf, strlen(fbuf));
-#endif
 
     if (aml_recy_flags_chk(flags)) {
         RECY_DBG("recy delay by flags: 0x%x\n", aml_recy->flags);
         if ((aml_bus_type != PCIE_MODE) && (bus_state_detect.bus_err == 1)) {
             bus_state_detect.bus_reset_ongoing = 0;
+            //recy reset rx update flag
+            update_rxptr = RXBUF_PTR_UPDATE_NONE;
         }
         return 0;
     }
     aml_hw->traffic_busy = 0;
+    aml_hw->usb_rst_test = 0;
 
     aml_recy_flags_set(AML_RECY_STATE_ONGOING | AML_RECY_DROP_XMIT_PKT);
 
@@ -626,11 +682,12 @@ int aml_recy_doit(struct aml_hw *aml_hw)
     if (aml_bus_type != PCIE_MODE && trace_log_file_info.log_buf && trace_log_file_info.ptr && trace_log_file_info.fail_buf) {
         AML_INFO("after recovery trace_flag:%d", trace_flag);
         aml_send_fwlog_cmd(aml_hw, trace_flag);
-        if (trace_flag) {
+        if (trace_flag == 1) {
             aml_hw->trace_bit_flag |= TRACE_ENABLE_BIT_FLAG;
             aml_detection_trace_init(aml_hw);
         }
     }
+    notify_bt_event(0);
 
 out:
     aml_recy->link_loss.is_requested = 0;
@@ -645,6 +702,7 @@ out:
     aml_recy->reason = 0;
     spin_unlock_bh(&aml_recy->aml_hw->cmd_mgr.lock);
     aml_recy_flags_clr(AML_RECY_STATE_ONGOING | AML_RECY_DROP_XMIT_PKT);
+    update_rxptr = RXBUF_PTR_UPDATE_NONE;
 
     return ret;
 }
@@ -684,15 +742,19 @@ static int aml_recy_detection(void)
         spin_unlock_bh(&cmd_mgr->lock);
         return false;
     }
-    if ((cmd_mgr->state == AML_CMD_MGR_STATE_CRASHED)
-        || (aml_recy->link_loss.is_enabled && aml_recy->link_loss.is_requested)) {
-        if (cmd_mgr->state == AML_CMD_MGR_STATE_CRASHED) {
-            aml_recy->reason = RECY_REASON_CODE_CMD_CRASH;
-        } else {
-            aml_recy->reason = RECY_REASON_CODE_FW_LINKLOSS;
+
+    if (aml_bus_type != USB_MODE) {
+        if ((cmd_mgr->state == AML_CMD_MGR_STATE_CRASHED)
+            || (aml_recy->link_loss.is_enabled && aml_recy->link_loss.is_requested)) {
+            if (cmd_mgr->state == AML_CMD_MGR_STATE_CRASHED) {
+                aml_recy->reason = RECY_REASON_CODE_CMD_CRASH;
+            } else {
+                aml_recy->reason = RECY_REASON_CODE_FW_LINKLOSS;
+            }
+            ret = true;
         }
-        ret = true;
     }
+
     if (aml_bus_type != PCIE_MODE) {
         if (!bus_state_detect.bus_reset_ongoing &&
             (bus_state_detect.bus_err == 1)) {
@@ -767,7 +829,8 @@ int aml_recy_init(struct aml_hw *aml_hw)
         return -ENOMEM;
     }
     aml_recy->aml_hw = aml_hw;
-    aml_recy->link_loss.is_enabled = 1;
+    if (aml_bus_type != USB_MODE)
+        aml_recy->link_loss.is_enabled = 1;
 
 #ifndef CONFIG_PT_MODE
     timer_setup(&aml_recy->timer, aml_recy_timer_cb, 0);

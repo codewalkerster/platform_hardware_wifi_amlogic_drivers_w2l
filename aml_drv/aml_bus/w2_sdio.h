@@ -20,8 +20,6 @@
 #define W2ls_W265S2_B_PRODUCT_AMLOGIC_EFUSE 0x0848
 #define W2ls_W255S1_B_PRODUCT_AMLOGIC_EFUSE 0x0850
 
-
-
 #define SDIO_MAX_BLK_CNT    511
 
 #define SDIO_BLKSIZE 512
@@ -37,26 +35,19 @@
 #else
     #define SRAM_MAX_LEN (1024 * 128)
 #endif
-#define SRAM_LEN (32 * 1024)
-#define ICCM_ROM_LEN (256 * 1024)
-#define ICCM_RAM_LEN (192 * 1024)
-#define ICCM_ALL_LEN (ICCM_ROM_LEN + ICCM_RAM_LEN)
-#define DCCM_ALL_LEN (192 * 1024)
-#define ICCM_ROM_ADDR (0x00100000)
-#define ICCM_RAM_ADDR (0x00100000 + ICCM_ROM_LEN)
-#define DCCM_RAM_ADDR (0x00d00000)
-#define DCCM_RAM_OFFSET (0x00700000) //0x00800000 - 0x00100000, in fw_flash
-#define BYTE_IN_LINE (9)
-#define ICCM_BUFFER_RD_LEN  (ICCM_RAM_LEN)
-#define ICCM_CHECK_LEN      (ICCM_RAM_LEN)
-#define DCCM_CHECK_LEN      (DCCM_ALL_LEN)
 
 #define ICCM_CHECK
-#define ICCM_ROM
-
 #define WIFI_SDIO_IF    (0xa05000)
-                 /*BIT(0): TX DONE intr, BIT(1): RX DONE intr*/
+/*BIT(0): TX DONE intr, BIT(1): RX DONE intr*/
 #define RG_SDIO_IF_INTR2CPU_ENABLE    (WIFI_SDIO_IF+0x30)
+
+#if 0
+#define WIFI_SUSPEND_CODE_ADDR (0x060070000)
+#define WIFI_SUSPEND_CODE_LEN (21668)
+#else
+#define WIFI_SUSPEND_CODE_ADDR (0x000064000)
+#define WIFI_SUSPEND_CODE_LEN (49152)
+#endif
 
 extern uint8_t *g_mmc_misc;
 extern struct aml_hwif_sdio g_hwif_rx_sdio;
@@ -123,9 +114,10 @@ extern struct aml_hif_sdio_ops g_hif_sdio_ops;
 extern unsigned char g_sdio_driver_insmoded;
 
 unsigned char aml_download_wifi_fw_img(char *firmware_filename);
+unsigned char aml_sdio_download_suspend_or_rf_fw(unsigned char fw_type);
+
 int aml_sdio_scat_req_rw(struct amlw_hif_scatter_req *scat_req);
 void aml_sdio_init_base_addr(void);
 void aml_sdio_init_w2_ops(void);
-
 
 #endif

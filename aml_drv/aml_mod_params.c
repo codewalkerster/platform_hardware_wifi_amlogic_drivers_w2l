@@ -9,6 +9,9 @@
 *
 ******************************************************************************
 */
+
+#define AML_MODULE  GENERIC
+
 #include <linux/module.h>
 #include <linux/rtnetlink.h>
 
@@ -759,6 +762,7 @@ static void aml_set_softmac_flags(struct aml_hw *aml_hw)
 
 void aml_set_vht_capa(struct aml_hw *aml_hw, struct wiphy *wiphy)
 {
+    struct ieee80211_supported_band *band_2GHz = wiphy->bands[NL80211_BAND_2GHZ];
     struct ieee80211_supported_band *band_5GHz = wiphy->bands[NL80211_BAND_5GHZ];
     int i;
     int nss = aml_hw->mod_params->nss;
@@ -848,6 +852,7 @@ void aml_set_vht_capa(struct aml_hw *aml_hw, struct wiphy *wiphy)
 #endif
         band_5GHz->vht_cap.cap &= ~IEEE80211_VHT_CAP_SHORT_GI_80;
     }
+    band_2GHz->vht_cap = band_5GHz->vht_cap;
 }
 
 void aml_set_ht_capa(struct aml_hw *aml_hw, struct wiphy *wiphy)
@@ -1165,7 +1170,7 @@ static void aml_set_rf_params(struct aml_hw *aml_hw, struct wiphy *wiphy)
 
 extern unsigned char g_chip_function_ctrl;
 void disable_chip_function(struct aml_hw *aml_hw) {
-    AML_PRINT(AML_DBG_MODULES_MAIN, "%s:%d, function ctrl:%02x\n", __func__, __LINE__, g_chip_function_ctrl);
+    AML_INFO("function ctrl:%02x\n", g_chip_function_ctrl);
 
     if (g_chip_function_ctrl & CHIP_FUNCTION_DISABLE_11AX) {
         aml_hw->mod_params->he_on = false;

@@ -13,7 +13,10 @@
 #include "aml_recy.h"
 #include "aml_msg_tx.h"
 #include "aml_scc.h"
-
+#ifdef CONFIG_AML_NAN_SUPPORT
+#include "aml_nan.h"
+#endif
+#include "aml_main.h"
 
 struct aml_wq *aml_wq_alloc(int len)
 {
@@ -110,7 +113,7 @@ static void aml_wq_doit(struct work_struct *work)
             case AML_WQ_HOST_GET_TRACE:
                 /* fw trace log 30s is not updated, host force get trace now */
                 AML_INFO(">>>No new fw trace received, host force get trace now.");
-                aml_traceind(aml_hw->ipc_env->pthis);
+                aml_traceind(aml_hw);
                 break;
             case AML_WQ_HOST_SET_REGDOM:
                 aml_do_set_regdom(aml_hw, aml_wq);
@@ -130,6 +133,14 @@ static void aml_wq_doit(struct work_struct *work)
             case AML_WQ_IPV6:
                 aml_send_notify_ip(aml_wq->aml_vif, IPV6_VER, aml_wq->data);
                 break;
+#ifdef CONFIG_AML_NAN_SUPPORT
+            case AML_WQ_NAN_SEND_FOLLOW_UP_MSG:
+                aml_nan_send_follow_up_msg(aml_hw, (wifi_nan_followup_cfg *)aml_wq->data);
+                break;
+            case AML_WQ_NAN_SEND_PUBLISH_MSG:
+                aml_nan_send_publish_request(aml_hw, (wifi_nan_publish_cfg *)aml_wq->data);
+                break;
+#endif
             default:
                 AML_INFO("wq type(%d) unknown", aml_wq->id);
                 break;

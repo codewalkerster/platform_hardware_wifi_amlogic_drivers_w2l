@@ -72,6 +72,10 @@
 // After updating the parameters, it must be modified at the same time.
 #define WIFI_CALI_VERSION   (16)
 #define WIFI_CALI_FILENAME  "w2l/aml_wifi_rf.txt"
+#define WIFI_COUNTRY_PWR_LIMIT_VERSION  (1)
+//#define WIFI_COUNTRY_PWR_LIMIT "w2l/aml_country_pwr_limit.txt"
+#define WIFI_COUNTRY_PWR_LIMIT     "w2l/aml_country_pwr_limit.txt"
+
 
 #define STRUCT_BUFF_LEN   252
 #define MAX_HEAD_LEN      92
@@ -92,6 +96,8 @@
 #define AML_CONNECTING   BIT(0)
 #define AML_DISCONNECTING   BIT(1)
 #define AML_GETTING_IP   BIT(2)
+#define AML_DISCONNECT   BIT(3)
+
 
 enum wifi_module_sn {
       MODULE_ITON = 0X1,
@@ -338,6 +344,7 @@ struct aml_vif {
             u8 assoc_ssid[MAC_SSID_LEN];
             int assoc_ssid_len;
             u8 connect_flags;
+            u16 auth_status;
         } sta;
         struct
         {
@@ -498,6 +505,7 @@ struct aml_sta {
     int listen_interval;
     struct twt_setup_ind twt_ind; /*TWT Setup indication*/
     u8 csa_support;
+    struct aml_reo_session *reos[IEEE80211_NUM_UPS];
 };
 
 #define AML_INVALID_STA 0xFF
@@ -709,6 +717,7 @@ enum suspend_ind_state {
 #define WOW_FILTER_OPTION_DISCONNECT BIT(5)
 #define WOW_FILTER_OPTION_GTK_ERROR BIT(6)
 #define WOW_FILTER_OPTION_GOOGLE_CAST_EN BIT(7)
+#define WOW_FILTER_OPTION_PNO BIT(8)
 struct tx_task_param {
     u32 tx_page_free_num;
     u32 tx_page_tot_num;
@@ -730,6 +739,39 @@ struct assoc_info {
     u8 addr[ETH_ALEN];
     u16 htcap;
     u8 csa_support;
+};
+
+struct priv_custom {
+    /* word1 */
+    bool registering;
+    char dbg_level;
+    char alpha2[2];
+    /* word2 */
+    u16 disconnect_reason_code;
+    u8 wake_reason;
+    u8 go_hidden_mode;
+    /* word3 */
+    u8 dfs_on;
+    bool vht_mu_bfmee;
+    u16 rx_average_rate;
+    /* word4 */
+    u8 retry_cnt;
+    bool wake_on_pno;
+    u8 res[2];
+    u32 lock_kt;
+    // struct
+    //struct dentry *d;
+    struct proc_dir_entry *proc_dir;
+    struct ieee80211_vht_cap vht_capa;
+};
+
+enum rxbuf_ptr_update_state {
+    /*init rx ptr state*/
+    RXBUF_PTR_UPDATE_NONE,
+    /*rx_ptr update done used in resume*/
+    RXBUF_PTR_UPDATE_DONE,
+    /*set state wait when host resume*/
+    RXBUF_PTR_UPDATE_WAIT,
 };
 
 /**
@@ -807,6 +849,7 @@ struct aml_hw {
     struct aml_mod_params *mod_params;
     unsigned long flags;
     struct wiphy *wiphy;
+    struct priv_custom customer_priv;
     u8 ext_capa[10];
 
     // VIFs
@@ -850,7 +893,9 @@ struct aml_hw {
 
     // RX path
     struct rxbuf_list rxbuf_list[RXBUF_NUM];
+    spinlock_t free_list_lock;
     struct list_head rxbuf_free_list;
+    spinlock_t used_list_lock;
     struct list_head rxbuf_used_list;
 
     struct aml_defer_rx defer_rx;
@@ -861,11 +906,11 @@ struct aml_hw {
     uint32_t dynabuf_stop_tx;     /* dynamic buf switch, tx stop flag */
     uint32_t send_tx_stop_to_fw;  /* dynamic buf switch, send tx stop to fw flag */
     uint8_t *host_buf;            /* host buf for test */
+#ifdef CONFIG_AML_SDIO_USB_FW_REORDER
+    bool aml_sdio_usb_host_reorder;      /* only effect on SDIO/USB, PCIE always does reorder in firmware */
     spinlock_t reorder_lock;
+#endif
     struct assoc_info rx_assoc_info;
-
-    spinlock_t free_list_lock;
-    spinlock_t used_list_lock;
 
 #ifdef CONFIG_AML_PREALLOC_BUF_SKB
     spinlock_t prealloc_rxbuf_lock;
@@ -936,9 +981,7 @@ struct aml_hw {
 
     u32 irq;
     u32 irq_done;
-    u32 irq_cnt;
-    u32 irq_status;
-    u32 irq_consume;
+    u32 irq_pending;
     struct ipc_e2a_msg g_msg1;
     struct ipc_e2a_msg g_msg2;
     struct ipc_dbg_msg g_dbg_msg;
@@ -992,7 +1035,9 @@ struct aml_hw {
     struct usb_ctrlrequest *g_cr;
     unsigned char *g_buffer;
     u8 la_enable;
+    u8 trace_enable;
     u8 trace_bit_flag;
+    u8 trace_malloc_success;
     struct timer_list detection_trace_timer;
     // Debug FS and stats
     struct aml_debugfs debugfs;
@@ -1027,20 +1072,44 @@ struct aml_hw {
     u8 traffic_busy;
     int min_cpu_freq;
     bool wfd_present;
+    bool wifi_suspend_err;
+    bool usb_rst_test;
 };
 
+extern unsigned int aml_partner_cust;
 u8 *aml_build_bcn(struct aml_bcn *bcn, struct cfg80211_beacon_data *new);
 
 void aml_chanctx_link(struct aml_vif *vif, u8 idx,
                         struct cfg80211_chan_def *chandef);
 void aml_chanctx_unlink(struct aml_vif *vif);
-int  aml_chanctx_valid(struct aml_hw *aml_hw, u8 idx);
+
+int aml_chanctx_band(struct aml_hw *aml_hw, u8 ch_idx);
+
+static inline int aml_chanctx_valid(struct aml_hw *aml_hw, u8 ch_idx)
+{
+    return aml_chanctx_band(aml_hw, ch_idx) >= 0;
+}
+
+bool aml_work_on_5g_band(struct aml_hw *aml_hw);
 
 static inline bool is_multicast_sta(int sta_idx)
 {
     return (sta_idx >= NX_REMOTE_STA_MAX);
 }
+
 struct aml_sta *aml_get_sta(struct aml_hw *aml_hw, const u8 *mac_addr);
+
+static inline struct aml_sta *aml_sta_get(struct aml_hw *aml_hw, u8 sta_id)
+{
+    struct aml_sta *sta = &aml_hw->sta_table[sta_id];
+
+    if (WARN_ON(sta_id >= (NX_REMOTE_STA_MAX + NX_VIRT_DEV_MAX)))
+        return NULL;
+    if (!sta->valid)    /* if recovering or disconnected */
+        return NULL;
+
+    return sta;
+}
 
 static inline uint8_t master_vif_idx(struct aml_vif *vif)
 {
@@ -1092,5 +1161,17 @@ int aml_cfg80211_add_key(struct wiphy *wiphy, struct net_device *netdev,
         u8 key_index, bool pairwise, const u8 *mac_addr,
 #endif
         struct key_params *params);
+
+void aml_sta_deinit(struct aml_hw *aml_hw, struct aml_sta *aml_sta);
+
+static inline void aml_sdio_usb_host_reorder_detected(struct aml_hw *aml_hw)
+{
+#ifdef CONFIG_AML_SDIO_USB_FW_REORDER
+    if (!aml_hw->aml_sdio_usb_host_reorder) {
+        aml_hw->aml_sdio_usb_host_reorder = true;
+        AML_INFO("=== enable host reorder ===\n");
+    }
+#endif
+}
 
 #endif /* _AML_DEFS_H_ */

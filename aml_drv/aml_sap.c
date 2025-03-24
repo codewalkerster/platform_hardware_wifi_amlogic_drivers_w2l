@@ -24,7 +24,10 @@ u8 bcn_save[AML_SCC_FRMBUF_MAXLEN];
  */
 void aml_save_bcn_buf(u8 *bcn_buf, size_t len)
 {
-    memcpy(bcn_save, bcn_buf, len);
+    if (len <= AML_SCC_FRMBUF_MAXLEN)
+        memcpy(bcn_save, bcn_buf, len);
+    else
+        AML_INFO("SAVE_BCN fail, it will be unpredictable error when has done scc\n");
 }
 
 u8* aml_get_beacon_ie_addr(u8* buf, int frame_len,u8 eid)

@@ -14,9 +14,10 @@
 #include <linux/skbuff.h>
 #include "hal_desc.h"
 #include "ipc_shared.h"
-#include "wifi_debug.h"
+#include "aml_log.h"
 #include "wifi_w2_shared_mem_cfg.h"
 #include "aml_static_buf.h"
+#include "aml_reorder.h"
 
 #define BUFFER_STATUS           (BIT(0) | BIT(1))
 #define BUFFER_NARROW           BIT(0)
@@ -240,6 +241,9 @@ enum rx_status_bits
     RX_STAT_SPURIOUS = 1 << 6,
     /// packet for monitor interface
     RX_STAT_MONITOR = 1 << 7,
+
+    /// Host reorder (combine two counter flags)
+    RX_STAT_HOST_REO = (RX_STAT_ALLOC | RX_STAT_DELETE),
 };
 
 /* Maximum number of rx buffer the fw may use at the same time
@@ -308,6 +312,9 @@ struct hw_rxhdr {
     u16 amsdu_len[NX_MAX_MSDU_PER_RX_AMSDU];
 };
 
+/* SDIO/USB only */
+#define AML_RHD_EXT(rhd)   (struct aml_rhd_ext *)(&((struct hw_rxhdr *)(rhd))->pattern)
+
 /**
  * struct aml_defer_rx - Defer rx buffer processing
  *
@@ -328,6 +335,7 @@ struct aml_defer_rx_cb {
     struct aml_vif *vif;
 };
 
+#ifdef CONFIG_AML_SDIO_USB_FW_REORDER
 struct rxdata {
     struct list_head list;
     struct sk_buff *skb;
@@ -342,6 +350,7 @@ struct fw_reo_info {
     u8 tid;
     u16 flag;
 };
+#endif
 
 struct debug_proc_rxbuff_info {
     u32 time;
@@ -373,7 +382,7 @@ struct rxbuf_list{
     /*
      * host memory segment 1: from rxbuf to gap;
      * host memory segment 2: from gap to end
-     * NB: segment 2 only exists if rxbuf_data_start < rxbuf_data_end (wraped)
+     * NB: segment 2 only exists if rxbuf_data_start > rxbuf_data_end (wrapped)
      */
     u8 *gap;
     u8 *end;
@@ -381,9 +390,20 @@ struct rxbuf_list{
     u8 *pos;                    /* current rx desc position in host memory */
     u32 fw_pos;                 /* current rx desc position in firmware memory */
 
-    u32 rx_buf_end;             /* rx buf's end address in firmware (it's scaleble) */
+    u32 rx_buf_end;             /* rx buf's end address in firmware (it's scalable) */
     u32 rxbuf_data_start;       /* first frame's start address in firmware */
     u32 rxbuf_data_end;         /* last frame's end address in firmware */
+
+    u32 pkt_cnt;
+    u64 rxbuf_start_time;
+    u64 rxbuf_end_time;
+};
+
+#define SNR_MAX 4
+struct rx_info_statis {
+    unsigned int rx_tp[SNR_MAX];
+    unsigned int snr_cfg[SNR_MAX];
+    unsigned int trial_cnt;
 };
 
 struct aml_dyn_snr_cfg {
@@ -391,10 +411,9 @@ struct aml_dyn_snr_cfg {
     unsigned int best_snr_cfg;
     unsigned int enable;
     unsigned int snr_mcs_ration;
-    u64 rx_byte_1; //trial 1
-    u64 rx_byte_2; //trial 2
     u64 rx_byte;   //all rx bytes
     //struct aml_rx_rate_stats rx_rate;
+    struct rx_info_statis rx_info;
     unsigned long last_time;
 };
 
@@ -403,7 +422,7 @@ struct aml_dyn_snr_cfg {
 #define AML_WRAP CO_BIT(31)
 #define RX_DATA_MAX_CNT (512 + 128)
 
-#define RXBUF_SIZE (340 * 1024)
+#define RXBUF_SIZE (360 * 1024)
 #define RXBUF_NUM (WLAN_AML_HW_RX_SIZE / RXBUF_SIZE)
 
 #define TEMP_RXBUF_SIZE (10 * 1024)
@@ -414,12 +433,16 @@ u8 aml_rxdataind(void *pthis, void *hostid);
 void aml_rx_deferred(struct work_struct *ws);
 void aml_rx_defer_skb(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
                        struct sk_buff *skb);
-void aml_rxdata_init(void);
-void aml_rxdata_deinit(void);
+
 void aml_scan_clear_scan_res(struct aml_hw *aml_hw);
 void aml_scan_rx(struct aml_hw *aml_hw, struct hw_rxhdr *hw_rxhdr, struct sk_buff *skb);
 void aml_rxbuf_list_init(struct aml_hw *aml_hw);
+
+#ifdef CONFIG_AML_SDIO_USB_FW_REORDER
+void aml_rxdata_init(void);
+void aml_rxdata_deinit(void);
 void aml_clear_reorder_list();
+#endif
 
 #ifndef CONFIG_AML_DEBUGFS
 void aml_dealloc_global_rx_rate(struct aml_hw *aml_hw, struct aml_sta *sta);

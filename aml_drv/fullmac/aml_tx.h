@@ -221,6 +221,8 @@ enum {
     AML_GAS_ACTION_FRAME = BIT(4),
     AML_GAS_INIT_REQ_FRAME = BIT(5),
     AML_GAS_INIT_RSP_FRAME = BIT(6),
+    AML_REPORT_NO_ACKED = BIT(7),
+    AML_MUST_TX_SUC = BIT(8),
 };
 
 /**
@@ -326,4 +328,5 @@ int aml_prep_dma_tx(struct aml_hw *aml_hw, struct aml_sw_txhdr *sw_txhdr, void *
 void sdio_checksum_process(struct aml_hw *aml_hw, struct sk_buff *skb, u8 *hw_calc, u8 *is_frag);
 
 void aml_tx_cfm_wait_rsp(struct aml_hw *aml_hw, bool ack, u8* func, u32 line);
+uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E sp_status, u32 frame_len, u32* len_diff, u64 cookie);
 #endif /* _AML_TX_H_ */

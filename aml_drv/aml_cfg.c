@@ -7,6 +7,9 @@
  *
  ****************************************************************************************
  */
+
+#define AML_MODULE  GENERIC
+
 #include <linux/firmware.h>
 #include <linux/if_ether.h>
 
@@ -20,6 +23,10 @@
 #if defined(CONFIG_AML_PLATFORM_ANDROID)
 #include "linux/amlogic/wifi_dt.h"
 extern u8 *wifi_get_mac(void);
+#endif
+
+#if defined(CONFIG_AML_PLATFORM_RANDOM_MAC)
+extern u8 *wifi_get_mac_random(void);
 #endif
 
 static struct file *aml_cfg_open(const char *path, int flag, int mode)
@@ -259,64 +266,58 @@ static int aml_cfg_to_file(struct aml_hw *aml_hw, struct aml_cfg *cfg, struct fi
      * - use aml oui:
      *     efuse (no), local (yes)
      * */
+    do {
 #ifdef CONFIG_AML_PLATFORM_ANDROID
-    /* get mac address from android (emmc) */
-    memcpy(vif0_mac, wifi_get_mac(), ETH_ALEN);
-    if (!fp && memcmp(vif0_mac, bcst_mac, ETH_ALEN) != 0)
-    {
-        aml_cfg_check_macaddr(vif0_mac, 0);
-        /* locally administered for vif1_mac */
-        memcpy(vif1_mac, vif0_mac, ETH_ALEN);
-        vif1_mac[0] |= BIT(1);
-        memcpy(vif2_mac, vif1_mac, ETH_ALEN);
-        vif2_mac[5] ^= BIT(0);
-#ifdef CONFIG_AML_NAN_SUPPORT
-        memcpy(vif3_mac, vif2_mac, ETH_ALEN);
-        vif3_mac[5] ^= BIT(1);
+        /* get mac address from android (emmc) */
+        memcpy(vif0_mac, wifi_get_mac(), ETH_ALEN);
+        if (!fp && memcmp(vif0_mac, bcst_mac, ETH_ALEN) != 0) {
+            aml_cfg_check_macaddr(vif0_mac, 0);
+            AML_INFO("get mac address from emmc is:%pM", vif0_mac);
+            break;
+        }
 #endif
-        /* update mac address to cfg->vifx_mac */
-        memcpy(cfg->vif0_mac, vif0_mac, ETH_ALEN);
-        memcpy(cfg->vif1_mac, vif1_mac, ETH_ALEN);
-        memcpy(cfg->vif2_mac, vif2_mac, ETH_ALEN);
-#ifdef CONFIG_AML_NAN_SUPPORT
-        memcpy(cfg->vif3_mac, vif3_mac, ETH_ALEN);
-#endif
-        AML_INFO("vif0 mac address:%pM, vif1 mac address: %pM, vif2 mac address: %pM\n",
-                cfg->vif0_mac, cfg->vif1_mac, cfg->vif2_mac);
-    }
-    else
-#endif
-    {
         /* get mac address from efuse */
         ret = aml_cfg_get_macaddr(aml_hw, vif0_mac);
         if (ret == 0) {
             aml_cfg_check_macaddr(vif0_mac, 0);
             AML_INFO("get mac address from efuse is:%pM", vif0_mac);
-        } else {
+            break;
+        }
+#ifdef CONFIG_AML_PLATFORM_RANDOM_MAC
+        /* get mac address from android (random) */
+        memcpy(vif0_mac, wifi_get_mac_random(), ETH_ALEN);
+        if (!fp && memcmp(vif0_mac, bcst_mac, ETH_ALEN) != 0) {
+            aml_cfg_check_macaddr(vif0_mac, 0);
+            AML_INFO("get mac address from platform random is:%pM", vif0_mac);
+            break;
+        }
+#endif
+        else {
             get_random_bytes(vif0_mac, ETH_ALEN);
             aml_cfg_check_macaddr(vif0_mac, 1);
             AML_INFO("get mac address from local is:%pM", vif0_mac);
         }
-        /* locally administered for vif1_mac */
-        memcpy(vif1_mac, vif0_mac, ETH_ALEN);
-        vif1_mac[0] |= BIT(1);
-        memcpy(vif2_mac, vif1_mac, ETH_ALEN);
-        vif2_mac[5] ^= BIT(0);
+    } while (0);
+
+    /* locally administered for vif1_mac */
+    memcpy(vif1_mac, vif0_mac, ETH_ALEN);
+    vif1_mac[0] |= BIT(1);
+    memcpy(vif2_mac, vif1_mac, ETH_ALEN);
+    vif2_mac[5] ^= BIT(0);
 #ifdef CONFIG_AML_NAN_SUPPORT
-        memcpy(vif3_mac, vif2_mac, ETH_ALEN);
-        vif3_mac[5] ^= BIT(1);
+    memcpy(vif3_mac, vif2_mac, ETH_ALEN);
+    vif3_mac[5] ^= BIT(1);
 #endif
 
-        /* update mac address to cfg->vifx_mac */
-        memcpy(cfg->vif0_mac, vif0_mac, ETH_ALEN);
-        memcpy(cfg->vif1_mac, vif1_mac, ETH_ALEN);
-        memcpy(cfg->vif2_mac, vif2_mac, ETH_ALEN);
+    /* update mac address to cfg->vifx_mac */
+    memcpy(cfg->vif0_mac, vif0_mac, ETH_ALEN);
+    memcpy(cfg->vif1_mac, vif1_mac, ETH_ALEN);
+    memcpy(cfg->vif2_mac, vif2_mac, ETH_ALEN);
 #ifdef CONFIG_AML_NAN_SUPPORT
-        memcpy(cfg->vif3_mac, vif3_mac, ETH_ALEN);
+    memcpy(cfg->vif3_mac, vif3_mac, ETH_ALEN);
 #endif
-        AML_INFO("vif0 mac address:%pM, vif1 mac address: %pM, vif2 mac address: %pM\n",
-                cfg->vif0_mac, cfg->vif1_mac, cfg->vif2_mac);
-    }
+    AML_INFO("vif0 mac address:%pM, vif1 mac address: %pM, vif2 mac address: %pM\n",
+        cfg->vif0_mac, cfg->vif1_mac, cfg->vif2_mac);
 
     if (fp) {
         aml_cfg_store_chipid(fp, cfg);
@@ -503,7 +504,7 @@ int aml_cfg_parse_phy(struct aml_hw *aml_hw, const char *filename,
     AML_DBG(AML_FN_ENTRY_STR);
 
     if ((ret = request_firmware(&cfg_fw, filename, aml_hw->dev))) {
-        AML_PRINT(AML_DBG_MODULES_CMD, KERN_CRIT "%s: Failed to get %s (%d)\n", __func__, filename, ret);
+        AML_ERR("Failed to get %s (%d)\n", filename, ret);
         return ret;
     }
 

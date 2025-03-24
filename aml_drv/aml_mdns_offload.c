@@ -10,8 +10,11 @@
 ****************************************************************************************
 */
 
+#define AML_MODULE  MDNS
+
 #include "aml_mdns_offload.h"
 #include "lmac_msg.h"
+#include "aml_msg_tx.h"
 
 /// The maximum number of response data that can be added
 #define MDNS_INDEX_ERR              (-1)
@@ -23,9 +26,23 @@ extern void aml_pci_writel(u32 data, u8* addr);
 
 static u32_boolean setOffloadState(struct aml_hw *aml_hw, u32_boolean enabled)
 {
-    if (aml_mdns_set_offload_state(aml_hw, enabled) != 0)
-        return false;
-    return true;
+    uint32_t ret;
+
+#ifdef MDNS_OFFLOAD_FEATURE
+    if (aml_mdns_set_offload_state(aml_hw, enabled) != 0) {
+        ret = false;
+        goto exit;
+    }
+    ret = true;
+#else
+    AML_INFO("MDNS_OFFLOAD_FEATURE is disabled!\n");
+    aml_mdns_set_offload_state(aml_hw, 0);
+     ret = false;
+#endif
+
+    exit:
+    AML_INFO("enabled:%d,ret:%d\n", enabled, ret);
+    return ret;
 }
 
 static void resetAll(struct aml_hw *aml_hw)
@@ -57,7 +74,7 @@ static int addProtocolResponses(struct aml_hw *aml_hw, char *networkInterface,
     }
     else
     {
-        AML_INFO("%s mdns frame size err\n", __func__);
+        AML_INFO("mdns frame size err\n");
     }
 
     return index;
@@ -97,8 +114,9 @@ static void setPassthroughBehavior(struct aml_hw *aml_hw, char *networkInterface
 }
 
 ANDROID_MDNS_OFFLOAD_VENDOR_IMPL = {
-#ifdef MDNS_OFFLOAD_FEATRUE
+
     .setOffloadState = setOffloadState,
+#ifdef MDNS_OFFLOAD_FEATURE
     .resetAll = resetAll,
     .addProtocolResponses = addProtocolResponses,
     .removeProtocolResponses = removeProtocolResponses,

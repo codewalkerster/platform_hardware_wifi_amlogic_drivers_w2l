@@ -73,15 +73,18 @@ typedef enum {
   *
   */
 typedef struct {
-    uint16_t publish_id;
+    uint8_t publish_id;
+    uint8_t inst_id;                                /**< Own service instance id */
+    uint8_t peer_inst_id;                           /**< Peer's service instance id */
     wifi_nan_service_type_t type;                   /**< Service type */
-    uint16_t service_name_len;
-    char service_name[NAN_WIFI_MAX_SVC_NAME_LEN];   /* Service name identifier */
-    uint16_t svc_info_len;
-    char svc_info[NAN_WIFI_MAX_SVC_INFO_LEN];       /* Service info shared in Subscribe frame */
+    uint8_t service_name_len;
+    uint8_t service_name[NAN_WIFI_MAX_SVC_NAME_LEN];   /* Service name identifier */
+    uint8_t svc_info_len;
+    uint8_t svc_info[NAN_WIFI_MAX_SVC_INFO_LEN];       /* Service info shared in Subscribe frame */
     uint16_t match_filter_len;
-    char matching_filter[NAN_WIFI_MAX_FILTER_LEN];  /* Comma separated filters for filtering services */
+    uint8_t matching_filter[NAN_WIFI_MAX_FILTER_LEN];  /* Comma separated filters for filtering services */
     uint8_t service_name_hash[NAN_SERVICE_HASH_LENGTH];
+    uint8_t peer_mac[6];
 } wifi_nan_publish_cfg;
 
 /**
@@ -89,14 +92,14 @@ typedef struct {
   *
   */
 typedef struct {
-    uint16_t subscribe_id;
+    uint8_t subscribe_id;
     wifi_nan_service_type_t type;                   /* Service type */
-    uint16_t service_name_len;
-    char service_name[NAN_WIFI_MAX_SVC_NAME_LEN];   /* Service name identifier */
-    uint16_t svc_info_len;
-    char svc_info[NAN_WIFI_MAX_SVC_INFO_LEN];       /* Service info shared in Subscribe frame */
+    uint8_t service_name_len;
+    uint8_t service_name[NAN_WIFI_MAX_SVC_NAME_LEN];   /* Service name identifier */
+    uint8_t svc_info_len;
+    uint8_t svc_info[NAN_WIFI_MAX_SVC_INFO_LEN];       /* Service info shared in Subscribe frame */
     uint16_t match_filter_len;
-    char matching_filter[NAN_WIFI_MAX_FILTER_LEN];  /* Comma separated filters for filtering services */
+    uint8_t matching_filter[NAN_WIFI_MAX_FILTER_LEN];  /* Comma separated filters for filtering services */
     uint8_t service_name_hash[NAN_SERVICE_HASH_LENGTH];
 } wifi_nan_subscribe_cfg;
 
@@ -108,8 +111,8 @@ typedef struct {
     uint8_t inst_id;                         /* Own service instance id */
     uint8_t peer_inst_id;                    /* Peer's service instance id */
     uint8_t peer_mac[6];                     /* Peer's MAC address */
-    uint16_t svc_info_len;
-    char svc_info[NAN_WIFI_MAX_SVC_INFO_LEN];/* Service info(or message) to be shared */
+    uint8_t svc_info_len;
+    uint8_t svc_info[NAN_WIFI_MAX_SVC_INFO_LEN];/* Service info(or message) to be shared */
     uint8_t service_name_hash[NAN_SERVICE_HASH_LENGTH];
 } wifi_nan_followup_cfg;
 
@@ -141,7 +144,7 @@ struct peer_svc_info {
 
 struct own_svc_info {
     struct list_head peer_list;                         /**< List of peers matched for specific service */
-    char svc_name[NAN_WIFI_MAX_SVC_NAME_LEN];           /**< Name identifying a service */
+    uint8_t svc_name[NAN_WIFI_MAX_SVC_NAME_LEN];           /**< Name identifying a service */
     uint8_t svc_id;                                     /**< Identifier for a service */
     uint8_t type;                                       /**< Service type (Publish/Subscribe) */
     uint8_t num_peer_records;                           /**< Count of peer records associated with svc_id */

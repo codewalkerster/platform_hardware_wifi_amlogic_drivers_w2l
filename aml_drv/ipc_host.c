@@ -14,6 +14,8 @@
  * INCLUDE FILES
  ******************************************************************************
  */
+#define AML_MODULE      GENERIC
+
 #include <linux/spinlock.h>
 #include "aml_defs.h"
 #include "aml_prof.h"
@@ -23,6 +25,8 @@
 #include "ipc_shared.h"
 #include "aml_msg_rx.h"
 #include "aml_recy.h"
+#include "aml_wq.h"
+#include "aml_msg_tx.h"
 
 /*
  * TYPES DEFINITION
@@ -134,10 +138,12 @@ static void ipc_host_radar_handler(struct ipc_host_env_tag *env)
         aml_hw->plat->hif_ops->hi_read_sram((unsigned char *)pulses,
             (unsigned char *)(unsigned long)(RADAR_EVENT_DESC_ARRAY + aml_hw->radar_pulse_index * 56),
             sizeof(struct radar_pulse_array_desc), USB_EP4);
+#ifdef SDIO_MODE_ON
     } else if (aml_bus_type == SDIO_MODE) {
         aml_hw->plat->hif_sdio_ops->hi_random_ram_read((unsigned char *)pulses,
             (unsigned char *)(unsigned long)(RADAR_EVENT_DESC_ARRAY + aml_hw->radar_pulse_index * 56),
             sizeof(struct radar_pulse_array_desc));
+#endif
     }
 
     aml_spin_lock(&((struct aml_hw *)env->pthis)->radar.lock);
@@ -173,9 +179,11 @@ static void ipc_host_chan_switch_ind_handler(void *pthis)
     if (aml_bus_type == USB_MODE) {
         aml_hw->plat->hif_ops->hi_read_sram((unsigned char *)&ind_info,
             (unsigned char *)CHAN_SWITCH_IND_MSG_ADDR, sizeof(struct chan_switch_ind_info), USB_EP4);
+#ifdef SDIO_MODE_ON
     } else if (aml_bus_type == SDIO_MODE) {
         aml_hw->plat->hif_sdio_ops->hi_sram_read((unsigned char *)&ind_info,
             (unsigned char *)CHAN_SWITCH_IND_MSG_ADDR, sizeof(struct chan_switch_ind_info));
+#endif
     }
     if (ind_info.msg_id == MM_CHANNEL_PRE_SWITCH_IND) {
         msg.id = MM_CHANNEL_PRE_SWITCH_IND;
@@ -254,7 +262,7 @@ static void ipc_sdio_host_msgack_handler(struct ipc_host_env_tag *env)
         AML_INFO("error: a2e msg hostid is null\n");
         return;
     }
-    //AML_PRINT(AML_DBG_MODULES_SDIO, "%s %p\n", __func__, hostid);
+    //AML_INFO("%p\n", hostid);
     env->msga2e_hostid = NULL;
     env->msga2e_cnt++;
     env->cb.recv_msgack_ind(env->pthis, hostid);
@@ -295,8 +303,10 @@ static void ipc_host_msgack_handler(struct ipc_host_env_tag *env)
 {
     if (aml_bus_type == USB_MODE) {
         ipc_usb_host_msgack_handler(env);
+#ifdef SDIO_MODE_ON
     } else if (aml_bus_type == SDIO_MODE) {
         ipc_sdio_host_msgack_handler(env);
+#endif
     } else {
         ipc_pci_host_msgack_handler(env);
     }
@@ -319,10 +329,10 @@ static void ipc_host_dbg_handler(struct ipc_host_env_tag *env)
     }
 }
 
-static void ipc_host_trace_handler(struct ipc_host_env_tag *env)
+static void ipc_host_trace_handler(struct aml_hw *aml_hw)
 {
     if (aml_bus_type != PCIE_MODE) {
-       env->cb.recv_trace_ind(env->pthis);
+       aml_traceind(aml_hw);
     }
 }
 
@@ -729,7 +739,7 @@ int ipc_host_msgbuf_push(struct ipc_host_env_tag *env, struct aml_ipc_buf *buf)
     shared_env->msg_e2a_hostbuf_addr[env->msgbuf_idx] = buf->dma_addr;
     env->msgbuf[env->msgbuf_idx] = buf;
     if (shared_env->msg_e2a_hostbuf_addr[env->msgbuf_idx] != buf->dma_addr) {
-        AML_PRINT(AML_DBG_MODULES_PCI, "error:msg_e2a_hostbuf_addr=0x%X,dma_addr=0x%x,msgbuf_idx=%d\n",shared_env->msg_e2a_hostbuf_addr[env->msgbuf_idx],buf->dma_addr,env->msgbuf_idx);
+        AML_ERR("error:msg_e2a_hostbuf_addr=0x%X,dma_addr=0x%x,msgbuf_idx=%d\n",shared_env->msg_e2a_hostbuf_addr[env->msgbuf_idx],buf->dma_addr,env->msgbuf_idx);
     }
     record_push_msg_buf(env,buf);
     env->msgbuf_idx = (env->msgbuf_idx + 1) % IPC_MSGE2A_BUF_CNT;
@@ -1005,46 +1015,110 @@ void ipc_host_irq_ext(struct ipc_host_env_tag *env, uint32_t status)
 }
 #endif
 
-void aml_store_excep_info(struct aml_hw *aml_hw)
-{
-    struct exceptinon_info excep_info = {0};
-    unsigned char fbuf[2048] = {0};
-    uint32_t sp_ctx[64] = {0};
-    int res = 0;
-    int size = sizeof(fbuf);
-    int i = 0;
+extern struct aml_pm_type g_wifi_pm;
 
-    if (aml_bus_type == SDIO_MODE) {
-        aml_hw->plat->hif_sdio_ops->hi_sram_read((unsigned char *)&excep_info,
-            (unsigned char *)EXCEPTION_INFO_ADDR, sizeof(struct exceptinon_info));
-        aml_hw->plat->hif_sdio_ops->hi_sram_read((unsigned char *)sp_ctx,
-            (unsigned char *)excep_info.sp, sizeof(sp_ctx));
-    } else {
-        AML_INFO("buf_type err, not support!");
+void aml_get_dbg_info(struct aml_hw *aml_hw)
+{
+    uint8_t dbg_info[DBG_INFO_LEN] = {0};
+    uint8_t fbuf[2 * DBG_INFO_LEN] = {0};
+    uint32_t sp_ctx[64] = {0};
+    int size = sizeof(fbuf);
+    int res = 0;
+    int i = 0;
+    struct assert_info *assert_dbg = NULL;
+    struct exception_info *excep_dbg = NULL;
+
+    AML_DBG(AML_FN_ENTRY_STR);
+
+    if (atomic_read(&g_wifi_pm.bus_suspend_cnt) || atomic_read(&g_wifi_pm.is_shut_down)
+        || bus_state_detect.bus_err) {
+        AML_ERR("bus no ready!");
         return;
     }
 
-    res = scnprintf(fbuf, sizeof(fbuf),
-        "exception info:\n"
-        "type                %08x\n"
-        "mstatus_mps_bits    %08x\n"
-        "mepc                %08x\n"
-        "mtval               %08x\n"
-        "mcause              %08x\n"
-        "sp                  %08x\n"
-        "fw_pc               %08x\n"
-        "Stack trace:\n",
-        excep_info.type, excep_info.mstatus_mps_bits, excep_info.mepc, excep_info.mtval,
-        excep_info.mcause, excep_info.sp, AML_REG_READ(aml_hw->plat, AML_ADDR_MAC_PHY, AML_FW_PC_POINTER));
-
-    for (i = 0; i < 64; i++) {
-        res += scnprintf(&fbuf[res], size - res, "0x%08x\n", sp_ctx[i]);
+#ifdef SDIO_MODE_ON
+    if (aml_bus_type == SDIO_MODE) {
+        aml_hw->plat->hif_sdio_ops->hi_random_ram_read((unsigned char *)dbg_info,
+            (unsigned char *)ASSERT_INFO_HOST_ADDR, DBG_INFO_LEN);
+    } else
+#endif
+    {
+        aml_hw->plat->hif_ops->hi_read_sram((unsigned char *)dbg_info,
+            (unsigned char *)ASSERT_INFO_HOST_ADDR, DBG_INFO_LEN, USB_EP2);
     }
 
-    AML_INFO("\n%s", fbuf);
-#ifdef CONFIG_AML_DEBUGFS
-    aml_send_err_info_to_diag(fbuf, strlen(fbuf));
+    /* get assert_err dbg info */
+    assert_dbg = (struct assert_info *)dbg_info;
+    /* get exception dbg info */
+    excep_dbg = (struct exception_info *)(dbg_info + sizeof(struct assert_info));
+    AML_INFO(">>>DBG_INFO: assert pattern 0x%08x, exception pattern 0x%08x, fw_pc:%08x\n",
+        assert_dbg->pattern, excep_dbg->pattern,
+        (AML_REG_READ(aml_hw->plat, AML_ADDR_MAC_PHY, AML_FW_PC_POINTER) / 0x40));
+
+    if (assert_dbg->pattern == DBG_ASSERT_PATTERN) {
+        AML_ERR("firmware ASSERT!\n");
+
+        res = scnprintf(fbuf, size,
+            "assert info:\n"
+            "type(0:assert err 1:assert_rec)     %d\n"
+            "ts                                  %lld\n"
+            "func_reg                            %08x\n"
+            "trace_file_id                       %d\n"
+            "line                                %d\n",
+            assert_dbg->type, assert_dbg->ts, assert_dbg->func_reg,
+            assert_dbg->trace_file_id, assert_dbg->line);
+    }
+
+    if (excep_dbg->pattern == DBG_EXCEPTION_PATTERN) {
+        AML_ERR("firmware EXCEPTION!\n");
+
+#ifdef SDIO_MODE_ON
+        if (aml_bus_type == SDIO_MODE) {
+            aml_hw->plat->hif_sdio_ops->hi_sram_read((unsigned char *)sp_ctx,
+                (unsigned char *)excep_dbg->sp, sizeof(sp_ctx));
+        } else
 #endif
+        {
+            aml_hw->plat->hif_ops->hi_read_sram((unsigned char *)sp_ctx,
+                (unsigned char *)excep_dbg->sp, sizeof(sp_ctx), USB_EP2);
+        }
+
+        res += scnprintf(&fbuf[res], size - res,
+            "exception info:\n"
+            "type                %08x\n"
+            "mstatus_mps_bits    %08x\n"
+            "mepc                %08x\n"
+            "mtval               %08x\n"
+            "mcause              %08x\n"
+            "sp                  %08x\n"
+            "fw_pc               %08x\n"
+            "Stack trace:\n",
+            excep_dbg->type, excep_dbg->mstatus_mps_bits, excep_dbg->mepc, excep_dbg->mtval,
+            excep_dbg->mcause, excep_dbg->sp, AML_REG_READ(aml_hw->plat, AML_ADDR_MAC_PHY, AML_FW_PC_POINTER));
+
+        for (i = 0; i < 64; i++) {
+            res += scnprintf(&fbuf[res], size - res, "0x%08x\n", sp_ctx[i]);
+        }
+    }
+
+    if (assert_dbg->pattern == DBG_ASSERT_PATTERN || excep_dbg->pattern == DBG_EXCEPTION_PATTERN) {
+        /* print and record dbg info */
+        AML_INFO("\n%s", fbuf);
+        aml_send_err_info_to_diag(fbuf, strlen(fbuf));
+
+        /* reset dbg_info in DCCM */
+        memset(dbg_info, 0, DBG_INFO_LEN);
+#ifdef SDIO_MODE_ON
+        if (aml_bus_type == SDIO_MODE) {
+            aml_hw->plat->hif_sdio_ops->hi_random_ram_write((unsigned char *)dbg_info,
+                (unsigned char *)ASSERT_INFO_HOST_ADDR, DBG_INFO_LEN);
+        } else
+#endif
+        {
+            aml_hw->plat->hif_ops->hi_write_sram((unsigned char *)dbg_info,
+                (unsigned char *)ASSERT_INFO_HOST_ADDR, DBG_INFO_LEN, USB_EP2);
+        }
+    }
 }
 
 void aml_sdio_usb_extend_irq_handle(struct aml_hw *aml_hw)
@@ -1062,13 +1136,18 @@ void aml_sdio_usb_extend_irq_handle(struct aml_hw *aml_hw)
             up(&aml_hw->aml_tx_sem);
             break;
         case DYNAMIC_BUF_LA_SWITCH_FINSH:
-            AML_PRINT(AML_DBG_MODULES_USB, "la page had been released completely!\n");
+            AML_INFO("la page had been released completely!\n");
             break;
-        case EXCEPTION_IRQ:
-            if (aml_bus_type == SDIO_MODE) {
-                AML_PRINT(AML_DBG_MODULES_SDIO, "firmware exception!\n");
-                aml_store_excep_info(aml_hw);
-            }
+        case DYNAMIC_BUF_TRACE_EXPEND_FINISH:
+            AML_INFO("USB TRACE READY!\n");
+            aml_hw->trace_malloc_success = 1;
+            break;
+        case DYNAMIC_BUF_TRACE_REDUCE_FINISH:
+            AML_INFO("USB TRACE REDUCE!\n");
+            aml_hw->trace_malloc_success = 0;
+            break;
+        case DBG_REPORT_IRQ:
+            aml_get_dbg_info(aml_hw);
             break;
         default:
             break;
@@ -1078,6 +1157,7 @@ void aml_sdio_usb_extend_irq_handle(struct aml_hw *aml_hw)
 /**
  ******************************************************************************
  */
+extern int update_rxptr;
 void ipc_host_irq(struct ipc_host_env_tag *env, uint32_t status)
 {
     // Acknowledge the pending interrupts
@@ -1087,8 +1167,16 @@ void ipc_host_irq(struct ipc_host_env_tag *env, uint32_t status)
     // Optimized for only one IRQ at a time
     if (status & IPC_IRQ_E2A_RXDESC)
     {
-        // handle the RX descriptor reception
-        ipc_host_rxdesc_handler(env);
+        //sdio&usb resume update rxbuf ptr first
+        if ((aml_bus_type != PCIE_MODE) && (update_rxptr != RXBUF_PTR_UPDATE_NONE))
+        {
+            AML_INFO("buf ptr need update \n");
+        }
+        else
+        {
+            // handle the RX descriptor reception
+            ipc_host_rxdesc_handler(env);
+        }
     }
     if (status & IPC_IRQ_E2A_MSG_ACK)
     {
@@ -1104,11 +1192,7 @@ void ipc_host_irq(struct ipc_host_env_tag *env, uint32_t status)
         int i;
 
         if (aml_bus_type != PCIE_MODE) {
-            u32 irq_consume = jiffies;
             aml_update_tx_cfm(env->pthis);
-            if (jiffies_to_msecs(jiffies - irq_consume) > 20)
-                AML_PRINT(AML_DBG_MODULES_IRQ, "sdio consume %ld\n", jiffies_to_msecs(jiffies - irq_consume));
-
         } else {
             // handle the TX confirmation reception
             aml_spin_lock(&((struct aml_hw *)env->pthis)->tx_lock);
@@ -1156,7 +1240,7 @@ void ipc_host_irq(struct ipc_host_env_tag *env, uint32_t status)
 
     if (((status & SDIO_IRQ_E2A_TRACE) && (aml_bus_type != PCIE_MODE)))
     {
-        ipc_host_trace_handler(env);
+        ipc_host_trace_handler((struct aml_hw *)env->pthis);
     }
     if ((status & SDIO_USB_EXTEND_E2A_IRQ) && (aml_bus_type != PCIE_MODE))
     {
@@ -1190,8 +1274,11 @@ int ipc_host_msg_push(struct ipc_host_env_tag *env, void *msg_buf, uint16_t len)
     // Copy the message in the IPC queue
     if (aml_bus_type == USB_MODE) {
         aml_hw->plat->hif_ops->hi_write_sram((unsigned char *)src, (unsigned char *)&(env->shared->msg_a2e_buf.msg), len, USB_EP4);
+#ifdef SDIO_MODE_ON
     } else if (aml_bus_type == SDIO_MODE) {
+        AML_INFO("sub id %d, fw_pc:%08x", ((struct aml_cmd *)msg_buf)->mm_sub_id, AML_REG_READ(aml_hw->plat, AML_ADDR_MAC_PHY, AML_FW_PC_POINTER) / 0x40);
         aml_hw->plat->hif_sdio_ops->hi_random_ram_write((unsigned char *)src, (unsigned char *)&(env->shared->msg_a2e_buf.msg), len);
+#endif
     } else {
         for (i = 0; i < len; i ++ ) {
             *dst++ = *src++;

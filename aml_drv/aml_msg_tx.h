@@ -209,7 +209,7 @@ int aml_csi_status_sp_read(struct net_device *dev, int csi_mode, struct csi_sp_s
 int aml_csi_status_com_read(struct net_device *dev, struct csi_com_status_get_ind *ind);
 unsigned int aml_efuse_read(struct aml_hw *aml_hw, u32 addr);
 int aml_scan_hang(struct aml_vif *aml_vif, int scan_hang);
-int aml_send_suspend_req(struct aml_hw *aml_hw, u8_l filter, enum wifi_suspend_state state);
+int aml_send_suspend_req(struct aml_hw *aml_hw, u16_l filter, enum wifi_suspend_state state);
 int aml_send_wow_pattern (struct aml_hw *aml_hw, struct aml_vif *vif,
                         struct cfg80211_pkt_pattern *param, int id);
 int aml_send_scanu_cancel_req(struct aml_hw *aml_hw, struct aml_vif *vif, struct scanu_cancel_cfm *cfm);
@@ -218,7 +218,7 @@ int aml_set_rekey_data(struct aml_vif *aml_vif, const u8 *kek, const u8 *kck, co
 int aml_tko_config_req(struct aml_hw *aml_hw, struct aml_vif *vif,
                         u16 interval, u16 retry_interval, u16 retry_count);
 int aml_set_cali_param_req(struct aml_hw *aml_hw, struct Cali_Param *cali_param);
-int aml_fw_reset(struct aml_vif *aml_vif);
+int aml_fw_reset(struct aml_hw *aml_hw, uint32_t mode);
 int _aml_get_efuse(struct aml_vif *aml_vif, u32 addr);
 int _aml_set_efuse(struct aml_vif *aml_vif, u32 addr, u32 value);
 int _aml_set_macbypass(struct aml_vif *aml_vif, unsigned int dpd_cfg);
@@ -254,6 +254,37 @@ void cfg80211_to_aml_chan(const struct cfg80211_chan_def *chandef, struct mac_ch
 int aml_send_set_buf_state_req(struct aml_hw *aml_hw, int buf_state);
 int _aml_set_la_capture(struct aml_vif *aml_vif, u32 bus1, u32 bus2);
 int _aml_fix_txpwr(struct aml_vif *aml_vif, int pwr);
-
+int _aml_set_usb_trace_enable(struct aml_hw *aml_hw, int value);
+int _aml_set_cca_timer(struct aml_vif *aml_vif, int timer1, int timer2, int cycle);
+int _aml_set_la_enable(struct aml_hw *aml_hw, int value);
+int aml_mdns_reset_all(struct aml_hw *aml_hw);
+int aml_set_mcc_ratio(struct aml_vif *aml_vif, int ratio);
+int aml_mdns_get_reset_miss_counter(struct aml_hw *aml_hw);
+int aml_mdns_add_passthrough_list(struct aml_hw *aml_hw, uint8_t *qname, int length);
+int aml_mdns_remove_passthrough_list(struct aml_hw *aml_hw, uint8_t *qname, int length);
+int aml_mdns_set_offload_state(struct aml_hw *aml_hw, int enable);
+int aml_coex_get_status(struct net_device *dev);
+int aml_mdns_add_protocol_data_status(struct aml_hw *aml_hw, void *list_param, uint8_t list_len, uint16_t data_len);
+int aml_mdns_remove_protocol_data(struct aml_hw *aml_hw, int index);
+int aml_mdns_get_reset_hit_counter(struct aml_hw *aml_hw, int index);
+int aml_mdns_get_reset_miss_counter(struct aml_hw *aml_hw);
+int aml_mdns_add_passthrough_list(struct aml_hw *aml_hw, uint8_t *qname, int length);
+int aml_mdns_remove_passthrough_list(struct aml_hw *aml_hw, uint8_t *qname, int length);
+int aml_mdns_set_passthrough_behavior(struct aml_hw *aml_hw, int behavior);
+int aml_mdns_add_protocol_data(struct aml_hw *aml_hw, void *list_param, uint8_t *raw_data, uint8_t index, uint16_t data_len);
+int aml_send_me_set_enable_suspend_fw_trace(struct aml_hw *aml_hw, int trace_enable);
+int aml_set_wfa_agg_tx_cnt_thres(struct aml_vif *aml_vif, int enable);
+int aml_reset_edca(struct aml_vif *aml_vif, int enable);
+int aml_send_default_key(struct aml_hw *aml_hw, u8 vif_index, u8 key_index, bool unicast, bool multicast);
+int aml_set_custom_ver_req(struct aml_hw *aml_hw, u8 version);
+int aml_send_cfg_req(struct aml_hw *aml_hw, bool_l vht_bfee, bool_l vht_mubfee, uint8_t bw, uint8_t retry_cnt);
+int aml_csi_set(struct net_device *dev, struct csi_set_req *req);
+int aml_send_get_rxfail_cnt(struct aml_hw *aml_hw, int vif_index);
+int aml_csi_runtime_set(struct net_device *dev, struct csi_set_req *req);
+int aml_send_early_beacon_mode(struct aml_hw *aml_hw, struct early_bcn *early_bcn_set);
+int aml_set_wfa_rts_based_txop(struct aml_vif *aml_vif, int enable);
+int aml_set_wmm_ie(struct aml_vif *aml_vif, int enable);
+int aml_set_suspend_tx_flush(struct aml_hw *aml_hw, int tx_flush_enable);
+int aml_suspend_form_fw_dynamic_check(struct aml_hw *aml_hw, int check);
 
 #endif /* _AML_MSG_TX_H_ */

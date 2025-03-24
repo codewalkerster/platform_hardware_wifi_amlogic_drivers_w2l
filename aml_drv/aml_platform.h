@@ -123,6 +123,8 @@
 #define PS_AWAKE   0x1
 #define PS_DOZE    0x2
 
+extern struct usb_device *g_udev;
+
 
 enum
 {
@@ -186,7 +188,7 @@ struct aml_hw;
  * @priv Private data for the link driver
  */
 struct aml_plat {
-    struct usb_device *usb_dev;
+    //struct usb_device *usb_dev;
     struct auc_hif_ops *hif_ops;
 
     struct device *dev;
@@ -261,9 +263,13 @@ static inline u32 aml_reg_read(struct aml_plat *plat, u32 base, u32 offset)
 
     if (aml_bus_type == USB_MODE) {
         return plat->hif_ops->hi_read_word((unsigned int)(unsigned long)AML_ADDR(plat, base, offset), USB_EP2);
-    } else if (aml_bus_type == SDIO_MODE) {
+    }
+#ifdef SDIO_MODE_ON
+    else if (aml_bus_type == SDIO_MODE) {
        return plat->hif_sdio_ops->hi_random_word_read((unsigned int)(unsigned long)AML_ADDR(plat, base, offset));
-    } else {
+    }
+#endif
+    else {
 #ifdef CONFIG_AML_POWER_SAVE_MODE
         if (offset == RG_AON_A54) {
             return aml_pci_readl(AML_ADDR(plat, base, offset));
@@ -285,9 +291,13 @@ static inline void aml_reg_write(u32 val, struct aml_plat *plat, u32 base, u32 o
 {
     if (aml_bus_type == USB_MODE) {
         plat->hif_ops->hi_write_word((unsigned int)(unsigned long)AML_ADDR(plat, base, offset), val, USB_EP1);
-    } else if (aml_bus_type == SDIO_MODE) {
+    }
+#ifdef SDIO_MODE_ON
+    else if (aml_bus_type == SDIO_MODE) {
         plat->hif_sdio_ops->hi_random_word_write((unsigned int)(unsigned long)AML_ADDR(plat, base, offset), val);
-    } else {
+    }
+#endif
+    else {
 #ifdef CONFIG_AML_POWER_SAVE_MODE
         if (offset == RG_AON_A54) {
             aml_pci_writel(val, AML_ADDR(plat, base, offset));
@@ -322,10 +332,14 @@ struct aml_pci
 static inline struct device *aml_platform_get_dev(struct aml_plat *aml_plat)
 {
     if (aml_bus_type == USB_MODE) {
-        return &(aml_plat->usb_dev->dev);
-    } else if (aml_bus_type == SDIO_MODE) {
+        return &(g_udev->dev);
+    }
+#ifdef SDIO_MODE_ON
+    else if (aml_bus_type == SDIO_MODE) {
         return aml_plat->dev;
-    } else {
+    }
+#endif
+    else {
         return &(aml_plat->pci_dev->dev);
     }
 }
@@ -358,5 +372,7 @@ int aml_plat_lmac_load(struct aml_plat *aml_plat);
 void aml_plat_mpif_sel(struct aml_plat *aml_plat);
 int aml_sdio_create_thread(struct aml_hw *aml_hw);
 void aml_sdio_destroy_thread(struct aml_hw *aml_hw);
+int aml_cpufreq_boost_remove(struct aml_hw *aml_hw);
+int aml_cpufreq_boost_update(struct aml_hw *aml_hw);
 
 #endif /* _AML_PLAT_H_ */

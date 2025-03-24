@@ -1,12 +1,6 @@
 #ifndef _FI_W2_SDIO_H
 #define _FI_W2_SDIO_H
 
- /* txcfm start address in sram  */
-#define   SRAM_TXCFM_START_ADDR  (0xa17000)
-
- /* flag start base address for store some flag info in sram */
-#define   SRAM_FLAG_MEM_BASE (0xa17fc0)
-
 #define howmanypage(x,y) (((x - 12) + ((y - 12) -1) )/ (y - 12))
 
 #ifdef CONFIG_SDIO_TX_ENH
@@ -36,8 +30,8 @@
 #define TXDESC_OFFSET         8 // 4 + 4
 #define USB_DATA_OFFSET    72 //payload offset
 
-#define SDIO_TX_PAGE_SMALL_SKIP_NUM 141
-#define SDIO_TX_PAGE_NUM_SMALL 115
+#define SDIO_TX_PAGE_SMALL_SKIP_NUM 203
+#define SDIO_TX_PAGE_NUM_SMALL 53
 #define SDIO_TX_PAGE_NUM_LARGE 255
 #define SDIO_DYNA_PAGE_NUM  140
 
@@ -52,6 +46,7 @@
 
 #define USB_DYNA_PAGE_NUM 56
 #define USB_LA_PAGE_NUM  15
+#define USB_TRACE_PAGE_NUM 6
 #else
 #define USB_PAGE_MAX    40
 
@@ -62,6 +57,7 @@
 #define USB_DYNA_PAGE_NUM 147
 #define USB_PAGE_LEN    1880
 #define USB_LA_PAGE_NUM  35
+#define USB_TRACE_PAGE_NUM 15
 #endif
 
 #define SDIO_LA_PAGE_NUM  42

@@ -205,7 +205,7 @@ enum aml_push_flags {
  * @AML_TXQ_IN_HWQ_LIST: The queue is scheduled for transmission
  * @AML_TXQ_STOP_FULL: No more credits for the queue
  * @AML_TXQ_STOP_CSA: CSA is in progress
- * @AML_TXQ_STOP_STA_PS: destination sta is currently in power save mode
+ * @AML_TXQ_STOP_STA_PS: Destination sta is currently in power save mode
  * @AML_TXQ_STOP_VIF_PS: Vif owning this queue is currently in power save mode
  * @AML_TXQ_STOP_CHAN: Channel of this queue is not the current active channel
  * @AML_TXQ_STOP_MU_POS: TXQ is stopped waiting for all the buffers pushed to

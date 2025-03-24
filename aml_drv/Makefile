@@ -1,4 +1,4 @@
-AML_VERS_NUM=6.10.0.0
+AML_VERS_NUM=v1.0.0_2025-03.24-w2l driver:594bac61
 #KERNELDIR=/usr/lib/modules/5.8.0-63-generic/build
 PWD=$(shell pwd)
 ifeq ($(ARCH),)
@@ -13,7 +13,50 @@ SYSTEM_TYPE = SYSTEM64
 CROSS_COMPILE ?= aarch64-linux-gnu-
 EXTRA_CFLAGS += -DSYSTEM64
 endif
+ifeq ($(ROKU_PROJECT), y)
+SDIO_MODE_ON = n
+-include $(BACKPORTS_VERSIONS)
+ifneq ($(BACKPORTED_KERNEL_VERSION),)
+export CFG_CFG80211_VERSION ?= $(BACKPORTED_KERNEL_VERSION)
+endif
 
+ifneq ($(BACKPORTS_VERSIONS),)
+LINUXINCLUDE := $(BACKPORTS_INCLUDE_DIR) $(LINUXINCLUDE)
+include $(BACKPORTS_VERSIONS)
+subdir-ccflags-y += -D__rcu=
+subdir-ccflags-y += -DCOMPAT_KERNEL_RELEASE=1
+subdir-ccflags-y += '-include' 'backport/backport.h'
+subdir-ccflags-y += -DCPTCFG_VERSION=\"$(BACKPORTS_VERSION)\"
+subdir-ccflags-y += -DCPTCFG_KERNEL_VERSION=\"$(BACKPORTED_KERNEL_VERSION)\"
+subdir-ccflags-y += -DCPTCFG_KERNEL_NAME=\"$(BACKPORTED_KERNEL_NAME)\"
+subdir-ccflags-y += -DBACKPORTED_KERNEL_NAME=\"$(BACKPORTED_KERNEL_NAME)\"
+subdir-ccflags-y += -DBACKPORTS_VERSION=\"$(BACKPORTS_VERSION)\"
+subdir-ccflags-y += -DBACKPORTED_KERNEL_VERSION=\"$(BACKPORTED_KERNEL_VERSION)\"
+subdir-ccflags-y += -Wno-error=missing-attributes
+subdir-ccflags-y += -Wno-error=stringop-truncation
+subdir-ccflags-y += -Wno-error=unused-variable
+endif
+subdir-ccflags-y += -DCONFIG_ROKU
+ifeq ($(BACKPORTS_3), y)
+subdir-ccflags-y += -DCOMPAT_KERNEL_RELEASE_3_14=1
+$(info set COMPAT_KERNEL_RELEASE_3_14)
+else
+# Assume all non_backport_3 is using backport_4_19
+subdir-ccflags-y += -DCOMPAT_KERNEL_RELEASE_4_19=1
+$(info set COMPAT_KERNEL_RELEASE_4_19)
+endif
+endif
+
+ifneq ($(CFG_CFG80211_VERSION),)
+VERSION_STR = $(subst $\",,$(subst ., , $(subst -, ,$(subst v,,$(CFG_CFG80211_VERSION)))))
+$(info VERSION_STR=$(VERSION_STR))
+X = $(firstword $(VERSION_STR))
+Y = $(word 2 ,$(VERSION_STR))
+Z = $(word 3 ,$(VERSION_STR))
+VERSION := $(shell echo "$$(( $(X) * 65536 + $(Y) * 256 + $(Z)))" )
+subdir-ccflags-y += -DCFG_CFG80211_VERSION=$(VERSION)
+$(info DCFG_CFG80211_VERSION=$(VERSION))
+endif
 
 ifeq ($(PROJ_NAME),p-amlogic)
 SRCTOP ?= /proj/vlsi.wifi/p-amlogic
@@ -83,6 +126,9 @@ CONFIG_AML_FPGA_PCIE ?= n
 # Amlogic specified android(/w Kernel) platform depends
 CONFIG_AML_PLATFORM_ANDROID ?= y
 
+# Use platform random mac
+CONFIG_AML_PLATFORM_RANDOM_MAC ?= n
+
 # Support to use preallocing static buffer for wlan driver reloadable
 CONFIG_AML_PREALLOC_BUF_STATIC ?= y
 
@@ -121,11 +167,15 @@ CONFIG_KERNEL_AX_PATCH ?= y
 endif
 # } // NEED 4.9 PATCH
 
+# compile sdio in driver
+SDIO_MODE_ON ?= y
+export SDIO_MODE_ON
 #CONFIG_SDIO_TX_ENH ?= y
 
 # Support sdio rx atuo interrupt function
 #CONFIG_SDIO_RX_AUTO_INT ?= y
 
+CONFIG_CUSTOMER_11D_FORBIDDEN ?= y
 
 subdir-ccflags-$(CONFIG_DEBUG_FS) += -DCONFIG_AML_DEBUGFS
 subdir-ccflags-$(CONFIG_DEBUG_FS) += -DCONFIG_AML_UM_HELPER_DFLT=\"$(CONFIG_AML_UM_HELPER_DFLT)\"
@@ -144,9 +194,8 @@ subdir-ccflags-$(CONFIG_AML_NAPI) += -DCONFIG_AML_NAPI
 subdir-ccflags-$(CONFIG_KERNEL_AX_PATCH) += -DCONFIG_KERNEL_AX_PATCH
 subdir-ccflags-$(CONFIG_SDIO_RX_AUTO_INT) += -DCONFIG_SDIO_RX_AUTO_INT
 #subdir-ccflags-$(CONFIG_SDIO_TX_ENH) += -DCONFIG_SDIO_TX_ENH
-
 subdir-ccflags-$(CONFIG_MDNS_OFFLOAD_FEATRUE) += -DMDNS_OFFLOAD_FEATRUE
-
+subdir-ccflags-$(SDIO_MODE_ON) += -DSDIO_MODE_ON
 # FW VARS
 subdir-ccflags-y += -DNX_VIRT_DEV_MAX=4
 subdir-ccflags-y += -DNX_REMOTE_STA_MAX=16
@@ -165,6 +214,10 @@ endif
 
 ifeq ($(CONFIG_AML_ANDROID),14)
 subdir-ccflags-y += -DCONFIG_AML_ANDROID=$(CONFIG_AML_ANDROID)
+endif
+
+ifeq ($(CONFIG_CUSTOMER_11D_FORBIDDEN),y)
+subdir-ccflags-y += -DCONFIG_CUSTOMER_11D_FORBIDDEN
 endif
 
 obj-$(CONFIG_AML_FULLMAC) += fullmac/

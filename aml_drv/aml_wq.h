@@ -35,6 +35,10 @@ enum aml_wq_type {
     AML_WQ_HOST_SET_REGDOM,
     AML_WQ_CANCEL_SCAN,
     AML_WQ_IPV6,
+#ifdef CONFIG_AML_NAN_SUPPORT
+    AML_WQ_NAN_SEND_FOLLOW_UP_MSG,
+    AML_WQ_NAN_SEND_PUBLISH_MSG,
+#endif
     AML_WQ_MAX,
 };
 

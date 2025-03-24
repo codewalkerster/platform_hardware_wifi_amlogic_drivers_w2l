@@ -15,7 +15,7 @@
 
 #include "aml_defs.h"
 #include "lmac_mac.h"
-#include "wifi_debug.h"
+#include "aml_log.h"
 
 #ifdef CONFIG_AML_RECOVERY
 
@@ -112,6 +112,7 @@ int aml_recy_deinit(void);
 bool aml_recy_connect_retry(void);
 int aml_recy_sta_connect(struct aml_hw *aml_hw, uint8_t *status);
 bool aml_recy_check_aml_vif_exit(struct aml_hw *aml_hw, struct aml_vif *aml_vif);
+void aml_recy_trigger(struct aml_hw *aml_hw, u8 reason);
 
 #define RECY_DBG(fmt, ...) do { \
     if (recy_dbg) { \

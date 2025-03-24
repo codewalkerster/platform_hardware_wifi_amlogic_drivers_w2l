@@ -1,3 +1,6 @@
+
+#define AML_MODULE  COMMON
+
 #include "usb_common.h"
 #include "chip_ana_reg.h"
 #include "wifi_intf_addr.h"
@@ -8,8 +11,9 @@
 #include "fi_w2_sdio.h"
 #include "chip_intf_reg.h"
 #include "aml_interface.h"
-#include "wifi_debug.h"
+#include "aml_log.h"
 #include "chip_bt_pmu_reg.h"
+#include <linux/sched/clock.h>
 
 struct auc_hif_ops g_auc_hif_ops;
 struct usb_device *g_udev = NULL;
@@ -18,9 +22,12 @@ unsigned char auc_driver_insmoded;
 unsigned char auc_wifi_in_insmod;
 unsigned char g_usb_after_probe;
 unsigned char g_chip_function_ctrl = 0;
+unsigned int auc_prob_cnt = 0;
 struct crg_msc_cbw *g_cmd_buf = NULL;
+unsigned char *g_kmalloc_buf = NULL;
 struct mutex auc_usb_mutex;
-unsigned char *g_kmalloc_buf;
+
+
 extern unsigned char wifi_drv_rmmod_ongoing;
 extern struct aml_bus_state_detect bus_state_detect;
 extern struct aml_pm_type g_wifi_pm;
@@ -60,20 +67,32 @@ void chip_function_select_usb(void) {
 static int auc_probe(struct usb_interface *interface, const struct usb_device_id *id)
 {
     g_udev = usb_get_dev(interface_to_usbdev(interface));
-    memset(g_kmalloc_buf,0,1024*20);
-    memset(g_cmd_buf,0,sizeof(struct crg_msc_cbw ));
-    g_usb_after_probe = 1;
+    memset(g_kmalloc_buf, 0,  1024*20);
+    memset(g_cmd_buf, 0, sizeof(struct crg_msc_cbw ));
+
+    auc_prob_cnt++;
 
     auc_w2_ops_init();
     g_auc_hif_ops.hi_enable_scat();
+
 #ifdef CONFIG_PM
     if (atomic_read(&g_wifi_pm.bus_suspend_cnt)) {
         atomic_set(&g_wifi_pm.bus_suspend_cnt, 0);
     }
 #endif
 
+    if (auc_prob_cnt > 1) {
+        PRINT("update udev new:0x%08x , old: 0x%08x, auc prob cnt %d\n", g_udev, g_usb_urb->dev, auc_prob_cnt);
+        bus_state_detect.bus_err = 1;
+        g_usb_urb->dev = g_udev;
+    }
+
+    g_usb_after_probe = 1;
     chip_function_select_usb();
-    PRINT("%s(%d), pid is %04x, function ctrl:%02x\n",__func__,__LINE__, g_udev->descriptor.idProduct, g_chip_function_ctrl);
+
+    PRINT("%s(%d), pid is %04x, function ctrl:%02x\n",
+        __func__, __LINE__, g_udev->descriptor.idProduct, g_chip_function_ctrl);
+
     return 0;
 }
 
@@ -107,16 +126,17 @@ static int auc_reset_resume(struct usb_interface *interface)
 static int auc_suspend(struct usb_interface *interface,pm_message_t state)
 {
     int cnt = 0;
+    unsigned int ret = 0;
 
 	//bt open
 	if ((auc_read_word_by_ep_for_bt(RG_BT_PMU_A16, USB_EP2) & BIT(31)))
 	{
 		//bt drv suspend set bit26
-		while (!(auc_read_word_by_ep_for_bt(RG_AON_A52, USB_EP2) & BIT(26)))
+		while (!(auc_read_word_by_ep_for_bt(RG_AON_A24, USB_EP2) & BIT(26)))
 		{
 			msleep(50);
 			cnt++;
-			if (cnt > 40)
+			if (cnt > 1000)
 			{
 				PRINT("bt drv suspend fail \n");
 				return -1;
@@ -168,18 +188,24 @@ static int auc_resume(struct usb_interface *interface)
 #endif
 
 extern lp_shutdown_func g_lp_wifi_shutdown_func;
+extern bt_shutdown_func g_bt_shutdown_func;
 void auc_shutdown(struct device *dev)
 {
     //Mask interrupt reporting to the host
     atomic_set(&g_wifi_pm.is_shut_down, 2);
+    AML_INFO("aml_usb_shutdown begin \n" );
 
     // Notify fw to enter shutdown mode
+    if (g_bt_shutdown_func != NULL)
+    {
+        g_bt_shutdown_func();
+    }
     if (g_lp_wifi_shutdown_func != NULL)
     {
         g_lp_wifi_shutdown_func();
     }
     //notify fw shutdown
-    auc_write_word_by_ep_for_wifi(RG_AON_A55, auc_read_word_by_ep_for_wifi(RG_AON_A55, USB_EP2)|BIT(28) ,USB_EP2);
+    auc_write_word_by_ep_for_wifi(RG_AON_A16, auc_read_word_by_ep_for_wifi(RG_AON_A16, USB_EP1)|BIT(28) ,USB_EP1);
 
     atomic_set(&g_wifi_pm.is_shut_down, 1);
 }
@@ -212,7 +238,9 @@ static struct usb_driver aml_usb_common_driver = {
     .suspend = auc_suspend,
     .resume = auc_resume,
 #endif
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(6, 8, 0)
     .drvwrap.driver.shutdown = auc_shutdown,
+#endif
 };
 
 
@@ -249,6 +277,7 @@ void aml_usb_rmmod(void)
     usb_deregister(&aml_usb_common_driver);
     auc_driver_insmoded = 0;
     wifi_drv_rmmod_ongoing = 0;
+    auc_prob_cnt = 0;
     g_auc_hif_ops.hi_cleanup_scat();
     FREE(g_cmd_buf, "cmd stage");
     FREE(g_kmalloc_buf, "reg tmp");
@@ -269,7 +298,7 @@ void aml_usb_reset(void)
     uint32_t try_cnt = 0;
 
 Try_again:
-    AML_PRINT(AML_DBG_MODULES_COMMON, "%s: ******* usb reset begin *******\n", __func__);
+    AML_INFO("******* usb reset begin *******\n");
 
 #ifndef CONFIG_PT_MODE
 
@@ -283,7 +312,7 @@ Try_again:
             try_cnt++;
             extern_wifi_set_enable(1);
             msleep(50);
-            AML_PRINT(AML_DBG_MODULES_COMMON, "%s: %d usb reset fail, try again(%d)\n", __func__, __LINE__, try_cnt);
+            AML_ERR("usb reset fail, try again(%d)\n", try_cnt);
             goto Try_again;
         }
     }
@@ -298,13 +327,13 @@ Try_again:
         if (count > 200) {
             count = 0;
             try_cnt++;
-            AML_PRINT(AML_DBG_MODULES_COMMON, "%s: %d usb reset fail, try again(%d)\n", __func__, __LINE__, try_cnt);
+            AML_ERR("usb reset fail, try again(%d)\n", try_cnt);
             goto Try_again;
         }
     };
     bus_state_detect.bus_reset_ongoing = 0;
     bus_state_detect.bus_err = 0;
-    AML_PRINT(AML_DBG_MODULES_COMMON, "%s: ******* usb reset end *******\n", __func__);
+    AML_INFO("******* usb reset end *******\n");
 
     return;
 #endif

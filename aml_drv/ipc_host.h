@@ -68,9 +68,6 @@ struct ipc_host_cb_tag
     /// WLAN driver call-back function: recv_dbg_ind
     uint8_t (*recv_dbg_ind)(void *pthis, void *host_id);
 
-    /// WLAN driver call-back function: recv_trace_ind
-    int (*recv_trace_ind)(void *pthis);
-
 };
 
 /// Struct used to associate a local pointer with a shared 32bits value
@@ -400,6 +397,7 @@ void *ipc_host_tx_host_id_to_ptr_for_sdio_usb(struct ipc_host_env_tag *env, uint
 void ipc_host_irq_ext(struct ipc_host_env_tag *env, uint32_t status);
 void ipc_host_rxdesc_handler(struct ipc_host_env_tag *env);
 void ipc_host_txcfm_handler(struct ipc_host_env_tag *env);
+void aml_get_dbg_info(struct aml_hw *aml_hw);
 
 struct debug_push_msginfo {
     u32 time;

@@ -12,6 +12,8 @@
 
 #include "aml_sha256_i.h"
 #include "aml_nan.h"
+#include "aml_wq.h"
+#include "aml_iwpriv_cmds.h"
 
 uint8_t g_ucInstanceID = 0;
 static nan_ctx_t s_nan_ctx = {0};
@@ -87,6 +89,26 @@ int hwaddr_aton2(const char *txt, u8 *addr)
     return pos - txt;
 }
 
+static void aml_nan_get_service_name_hash(uint8_t service_name_hash[], char svc_name[], int svc_name_len)
+{
+    char aucServiceName[256] = {0};
+    struct sha256_state r_SHA_256_state = {0};
+    uint8_t auc_tk[32] = {0};
+    uint32_t u4Idx = 0;
+
+    memcpy(aucServiceName, svc_name, svc_name_len);
+    for (u4Idx = 0; u4Idx < strlen(aucServiceName); u4Idx++) {
+        if ((aucServiceName[u4Idx] >= 'A') &&
+            (aucServiceName[u4Idx] <= 'Z'))
+            aucServiceName[u4Idx] = aucServiceName[u4Idx] + 32;
+    }
+    sha256_init(&r_SHA_256_state);
+    sha256_process(&r_SHA_256_state, aucServiceName, strlen(aucServiceName));
+    sha256_done(&r_SHA_256_state, auc_tk);
+    memcpy(service_name_hash, auc_tk, NAN_SERVICE_HASH_LENGTH);
+    nan_util_dump("service hash", auc_tk, NAN_SERVICE_HASH_LENGTH);
+}
+
 static void aml_nan_record_own_svc(uint8_t id, uint8_t type, const char svc_name[])
 {
     struct own_svc_info *p_svc = NULL;
@@ -127,24 +149,27 @@ static struct own_svc_info *nan_find_own_svc(uint8_t svc_id)
     return p_svc;
 }
 
-static void aml_nan_get_service_name_hash(uint8_t service_name_hash[], char svc_name[], int svc_name_len)
+static struct own_svc_info *nan_service_match(uint8_t *sid, uint8_t type)
 {
-    char aucServiceName[256] = {0};
-    struct sha256_state r_SHA_256_state = {0};
-    uint8_t auc_tk[32] = {0};
-    uint32_t u4Idx = 0;
+    uint8_t svc_name_hash[NAN_SERVICE_HASH_LENGTH];
+    struct own_svc_info *p_svc = NULL;
 
-    memcpy(aucServiceName, svc_name, svc_name_len);
-    for (u4Idx = 0; u4Idx < strlen(aucServiceName); u4Idx++) {
-        if ((aucServiceName[u4Idx] >= 'A') &&
-            (aucServiceName[u4Idx] <= 'Z'))
-            aucServiceName[u4Idx] = aucServiceName[u4Idx] + 32;
+    if (sid == NULL) {
+        AML_INFO("Service id is NULL!");
+        return NULL;
     }
-    sha256_init(&r_SHA_256_state);
-    sha256_process(&r_SHA_256_state, aucServiceName, strlen(aucServiceName));
-    sha256_done(&r_SHA_256_state, auc_tk);
-    memcpy(service_name_hash, auc_tk, NAN_SERVICE_HASH_LENGTH);
-    nan_util_dump("service hash", auc_tk, NAN_SERVICE_HASH_LENGTH);
+
+    for (int i = 0; i < NAN_WIFI_NAN_MAX_SVC_SUPPORTED; i++) {
+        aml_nan_get_service_name_hash(svc_name_hash, s_nan_ctx.own_svc[i].svc_name,
+            strlen(s_nan_ctx.own_svc[i].svc_name));
+
+        if (!memcmp(svc_name_hash, sid, NAN_SERVICE_HASH_LENGTH) && s_nan_ctx.own_svc[i].type == type) {
+            p_svc = &s_nan_ctx.own_svc[i];
+            break;
+        }
+    }
+
+    return p_svc;
 }
 
 uint32_t aml_nan_publish_req(wifi_nan_publish_cfg *publish_conf)
@@ -161,6 +186,7 @@ uint32_t aml_nan_publish_req(wifi_nan_publish_cfg *publish_conf)
 
     if (publish_conf->publish_id == 0) {
         publish_conf->publish_id = ++g_ucInstanceID;
+        publish_conf->inst_id = publish_conf->publish_id;
     }
 
     s_nan_ctx.nan_svc_num++;
@@ -239,8 +265,24 @@ uint32_t aml_nan_followup_send(wifi_nan_followup_cfg *fup_params)
     return AML_OK;
 }
 
-int aml_nan_service_recv(struct peer_svc_info *peer_svc)
+void aml_nan_recv_svc_add_wq(struct aml_hw *aml_hw, void *data, uint32_t len, enum aml_wq_type wq_type)
 {
+    struct aml_wq *aml_wq;
+
+    aml_wq = aml_wq_alloc(len);
+    if (!aml_wq) {
+        AML_INFO("alloc workqueue out of memory");
+        return;
+    }
+    aml_wq->id = wq_type;
+    memcpy(aml_wq->data, data, len);
+    aml_wq_add(aml_hw, aml_wq);
+}
+
+int aml_nan_service_recv(struct aml_hw *aml_hw, struct peer_svc_info *peer_svc)
+{
+    struct own_svc_info *p_own_svc = NULL;
+
     switch (peer_svc->type) {
         case NAN_SDA_SERVICE_CONTROL_TYPE_PUBLISH:
             // recv publish service
@@ -251,7 +293,20 @@ int aml_nan_service_recv(struct peer_svc_info *peer_svc)
             AML_INFO("request_instance_id:   %d", peer_svc->own_svc_id);
             AML_INFO("peer_svc_info:         %s", peer_svc->peer_svc_info);
             AML_INFO("==============================================");
-            // check own subscribe svc is this publish svc, if yes, store this peer svc.
+            // check own subscribe svc is this publish svc, if yes, say hello.
+            p_own_svc = nan_service_match(peer_svc->service_name_hash, NAN_SUBSCRIBE);
+            if (p_own_svc) {
+                // say hello
+                wifi_nan_followup_cfg fllowup_conf = {0};
+                fllowup_conf.inst_id = p_own_svc->svc_id;
+                fllowup_conf.peer_inst_id = peer_svc->svc_id;
+                memcpy(fllowup_conf.peer_mac, peer_svc->peer_nmi, 6);
+                fllowup_conf.svc_info_len = strlen("hello");
+                memcpy(fllowup_conf.svc_info, "hello", strlen("hello"));
+
+                aml_nan_recv_svc_add_wq(aml_hw, (void *)&fllowup_conf,
+                    sizeof(wifi_nan_followup_cfg), AML_WQ_NAN_SEND_FOLLOW_UP_MSG);
+            }
             break;
         case NAN_SDA_SERVICE_CONTROL_TYPE_SUBSCRIBE:
             // recv subscribe service
@@ -262,6 +317,23 @@ int aml_nan_service_recv(struct peer_svc_info *peer_svc)
             AML_INFO("request_instance_id:   %d", peer_svc->own_svc_id);
             AML_INFO("peer_svc_info:         %s", peer_svc->peer_svc_info);
             AML_INFO("==============================================");
+
+            p_own_svc = nan_service_match(peer_svc->service_name_hash, NAN_PUBLISH);
+            if (p_own_svc) {
+                // SOLICITED publish
+                wifi_nan_publish_cfg publish_req = {0};
+
+                memcpy(publish_req.service_name, p_own_svc->svc_name, strlen(p_own_svc->svc_name));
+                memcpy(publish_req.service_name_hash, peer_svc->service_name_hash, 6);
+                memcpy(publish_req.peer_mac, peer_svc->peer_nmi, 6);
+                publish_req.type = NAN_PUBLISH_SOLICITED;
+                publish_req.publish_id = p_own_svc->svc_id;
+                publish_req.inst_id = p_own_svc->svc_id;
+                publish_req.peer_inst_id = peer_svc->svc_id;
+
+                aml_nan_recv_svc_add_wq(aml_hw, (void *)&publish_req,
+                    sizeof(wifi_nan_publish_cfg), AML_WQ_NAN_SEND_PUBLISH_MSG);
+            }
             break;
         case NAN_SDA_SERVICE_CONTROL_TYPE_FOLLOWUP:
             // recv follow up msg

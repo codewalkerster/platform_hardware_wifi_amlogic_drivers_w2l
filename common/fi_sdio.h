@@ -25,7 +25,12 @@
 #define MAC_REG_BASE         0x00a00000
 #define MAC_DCCM_AHB_BASE    0x00d00000
 #define REG_OF_VENDOR_ID (MAC_SRAM_BASE) //usb useless addr
-#define REG_OF_SYNC_RSSI (MAC_SRAM_BASE + 4) //usb useless addr
+
+ /* txcfm start address in sram  */
+#define SRAM_TXCFM_START_ADDR       (0xa17000)
+ /* flag start base address for store some flag info in sram */
+#define SRAM_FLAG_MEM_BASE          (0xa17fc0)
+#define CHAN_SWITCH_IND_MSG_ADDR    (0xa17fe4)
 
 /*
 * BT device baseAddr seen from wifi system side
@@ -42,11 +47,16 @@
 //base address
 #define   APP_CMD_PERFIFO_LEN  64
 #define   APP_CMD_FIFO_NUM  2
-#define   CMD_DOWN_FIFO_CTRL_ADDR  (MAC_SRAM_BASE + 8) //usb useless addr
-#define   CMD_DOWN_FIFO_FDB_ADDR  (CMD_DOWN_FIFO_CTRL_ADDR)
-#define   CMD_DOWN_FIFO_FDN_ADDR  (CMD_DOWN_FIFO_CTRL_ADDR+4)
-#define   CMD_DOWN_FIFO_FDH_ADDR  (CMD_DOWN_FIFO_CTRL_ADDR+8)
-#define   CMD_DOWN_FIFO_FDT_ADDR  (CMD_DOWN_FIFO_CTRL_ADDR+12)//to 0x0082e78c still has 120 bytes
+#define   CMD_DOWN_FIFO_CTRL_ADDR (MAC_SRAM_BASE + 8) //usb useless addr
+#define   CMD_DOWN_FIFO_FDB_ADDR  (CMD_DOWN_FIFO_CTRL_ADDR)   //MAC_SRAM_BASE + 0x8
+#define   CMD_DOWN_FIFO_FDN_ADDR  (CMD_DOWN_FIFO_CTRL_ADDR+4) //MAC_SRAM_BASE + 0xc
+#define   CMD_DOWN_FIFO_FDH_ADDR  (CMD_DOWN_FIFO_CTRL_ADDR+8) //MAC_SRAM_BASE + 0x10
+#define   CMD_DOWN_FIFO_FDT_ADDR  (CMD_DOWN_FIFO_CTRL_ADDR+12)//MAC_SRAM_BASE + 0x14    to 0x0082e78c still has 120 bytes
+#define   REG_OF_SYNC_TWO_RSSI    (MAC_SRAM_BASE + 0x1c)
+#define   REG_OF_SYNC_RSSI        (MAC_SRAM_BASE + 0x20)
+#define   REG_OF_SYNC_SNR         (MAC_SRAM_BASE + 0x24)
+#define   REG_OF_SYNC_P2P_RSSI    (MAC_SRAM_BASE + 0x28)
+#define   SRAM_DATA_BUF           (MAC_SRAM_BASE + 0x100)//for host trasfer err after suspend fail
 
 /*wifi operate mode */
 #define MODE_IBSS 0

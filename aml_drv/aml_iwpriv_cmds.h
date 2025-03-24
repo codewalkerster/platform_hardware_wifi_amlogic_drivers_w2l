@@ -1,7 +1,7 @@
 #ifndef __AML_IWPRIV_CMD_H
 #define __AML_IWPRIV_CMD_H
 #include <net/iw_handler.h>
-#include "wifi_debug.h"
+#include "aml_log.h"
 
 extern struct iw_handler_def iw_handle;
 extern int aml_get_txq(struct net_device *dev);
@@ -26,7 +26,7 @@ enum aml_iwpriv_subcmd
     AML_IWP_SEND_TWT_TEARDOWN = 16,
     AML_IWP_GET_EFUSE = 17,
     AML_IWP_SET_EFUSE = 18,
-    AML_IWP_RECY_CTRL = 19,
+    AML_IWP_SET_RECOVERY = 19,
     AML_IWP_SET_AMSDU_MAX = 20,
     AML_IWP_GET_RATE_INFO = 21,
     AML_IWP_SET_AMSDU_TX = 22,
@@ -55,7 +55,7 @@ enum aml_iwpriv_subcmd
     AML_IWP_BUS_START_TEST = 45,
     AML_MEM_DUMP = 46,
     AML_IWP_CCA_CHECK = 47,
-    AML_IWP_SET_DEBUG = 48,
+    AML_IWP_LOG_LEVELS = 48,
     AML_PCIE_STATUS = 49,
     AML_IWP_ENABLE_WF = 50,
     AML_IWP_GET_CLK = 51,
@@ -147,8 +147,16 @@ enum aml_iwpriv_subcmd
     AML_IWP_SET_15P4_MAC_EFUSE = 140,
     AML_IWP_GET_15P4_MAC_FROM_EFUSE = 141,
     AML_IWP_SET_TCP_ACK_WINDOW_SCALE = 142,
+    AML_IWP_SET_CSI_RUNTIME = 143,
+    AML_IWP_USB_TRACE_ENABLE = 144,
+    AML_IWP_GET_CSI_LINK_INFO = 145,
+    AML_IWP_CLEAR_STATS = 146,
+    AML_IWP_SUSPEND_TRACE_ENABLE = 147,
+    AML_IWP_SET_CCA_TIMER = 148,
 };
 
 #define IW_PRIV_INT_SIZE_MASK   0x01FF
+
+int aml_is_valid_mac_addr(const char* mac, int byte_length);
 
 #endif

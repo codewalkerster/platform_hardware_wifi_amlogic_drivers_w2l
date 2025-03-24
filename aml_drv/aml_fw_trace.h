@@ -121,10 +121,10 @@ struct aml_fw_trace {
 };
 
 struct log_file_info {
-    char *log_buf;
-    uint16_t *ptr;
-    uint16_t len;
-    uint16_t *fail_buf;
+    uint8_t *log_buf;
+    uint8_t *ptr;
+    uint8_t *fail_buf;
+    uint32_t len;
     struct mutex mutex;
 };
 
@@ -179,9 +179,10 @@ int aml_fw_trace_config_filters(struct aml_fw_trace_buf *trace_buf,
 int aml_fw_trace_save_filters(struct aml_fw_trace *trace);
 int aml_fw_trace_restore_filters(struct aml_fw_trace *trace);
 int aml_log_file_info_init(int mode);
-loff_t aml_get_file_size(const char *filename);
 int aml_trace_log_to_file(uint16_t *trace, uint16_t *trace_limit);
 void aml_send_err_info_to_diag(char *pbuf, int len);
+int aml_send_log_to_user(char *pbuf, uint16_t len, int msg_type);
+int aml_trace_buf_init(void);
 
 /**
  * aml_fw_trace_empty() - Check if shared buffer is empty

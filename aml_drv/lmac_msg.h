@@ -413,6 +413,10 @@ enum priv_e2a_tag {
     PRIV_MDNS_ADDPASSTHROUGH_CFM,
     PRIV_MDNS_GET_HIT_CFM,
     PRIV_MDNS_GET_MISS_CFM,
+    PRIV_FW2DRV_CSI_STATUS,
+    PRIV_RESUME_RXBUF_PTR_IND,
+    PRIV_RESUME_CFM,
+    PRIV_RXFAILCNT_CFM,
     PRIV_SUB_E2A_MAX,
 };
 
@@ -479,6 +483,16 @@ enum mm_sub_a2e_tag {
     MDNS_REMOVE_PASS_LIST,
     MDNS_RESET_ALL,
     MDNS_ADD_PROTOCOL_STATUS,
+    MM_SUB_CSI_RUN_TIME_SET,
+    MM_SUB_SET_USB_TRACE_STATE,
+    MM_SUB_FORM_FW_DYNA_CHECK,
+    MM_SUB_TX_FLUSH,
+    MM_SUB_GET_RXFAIL_CNT,
+    MM_SUB_SET_CFG_REQ,
+    MM_SUB_SET_CUSTOM_VER,
+    MM_SUB_ADD_DEFAULT_KEY,
+    MM_SUB_SET_SUSPEND_FW_TRACE,
+    MM_SUB_SET_CCA_TIMER,
     /// the MAX
     MM_SUB_A2E_MAX,
     /// New members cannot be added below
@@ -588,6 +602,13 @@ enum mm_features
 
 /// Maximum number of words in the configuration buffer
 #define PHY_CFG_BUF_SIZE     16
+
+/// Structure suspend/resume forming fw can check dynamic buf
+struct suspend_form_dynamic
+{
+    /// Buffer containing the parameters specific for the PHY used
+    u32_l can_check;
+};
 
 /// Structure containing the parameters of the PHY configuration
 struct phy_cfg_tag
@@ -1090,6 +1111,13 @@ struct coex_stop_restore_txq_ind
     u8_l wifi_inactive_flag;
 };
 
+struct csi_fw_status_ind
+{
+    u8_l csi_ready_flag;
+    u8_l reserved;
+    u16_l csi_abnormal_info;
+};
+
 /// Structure containing the parameters of the @ref MM_CONNECTION_LOSS_IND message.
 struct mm_connection_loss_ind
 {
@@ -1415,7 +1443,7 @@ struct mm_mu_group_update_req
         u8_l group_id;
         /// User position
         u8_l user_pos;
-    } groups[0];
+    } groups[];
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1554,7 +1582,7 @@ struct scanu_macth_set
   //SSID to be matched; may be zero-length in case of BSSID match or no match (RSSI only)
   struct mac_ssid ssId;
   //BSSID to be matched; may be all-zero BSSID in case of SSID match or no match (RSSI only)
-#if LINUX_VERSION_CODE > KERNEL_VERSION(4,12,0)
+#if CFG80211_VERSION_CODE > KERNEL_VERSION(4,12,0)
   struct mac_addr bssid;
 #endif
   //don't report scan results below this threshold (in s32 dBm)
@@ -1587,7 +1615,7 @@ struct scanu_bss_select_adjust {
 /// Structure containing the parameters of the @ref SCANU_SCHED_START_REQ message
 struct scanu_sched_scan_start_req
 {
-#if LINUX_VERSION_CODE > KERNEL_VERSION(4,12,0)
+#if CFG80211_VERSION_CODE > KERNEL_VERSION(4,12,0)
     //identifies this request.
     uint64_t reqid;
 #endif
@@ -2186,7 +2214,7 @@ struct sm_connect_req
     u16_l ie_len;
     /// Buffer containing the additional information elements to be put in the
     /// association request
-    u32_l ie_buf[0];
+    u32_l ie_buf[];
 };
 
 /// Structure containing the parameters of the @ref SM_CONNECT_CFM message.
@@ -2229,7 +2257,7 @@ struct sm_connect_ind
     /// EDCA parameters
     u32_l ac_param[AC_MAX];
     /// IE buffer
-    u32_l assoc_ie_buf[0];
+    u32_l assoc_ie_buf[];
 };
 
 struct sm_connect_ind_ex
@@ -2303,7 +2331,7 @@ struct sm_ft_auth_ind
     /// Size of the FT elements
     u16_l ft_ie_len;
     /// Fast Transition elements in the authentication
-    u32_l ft_ie_buf[0];
+    u32_l ft_ie_buf[];
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -3040,6 +3068,14 @@ struct csi_status_com_get_ind
     u32_l packet_idx;
 };
 
+struct csi_link_info_ind
+{
+    u8_l bw;
+    u8_l nss;
+    u8_l protocol_mode;
+    u8_l rev;
+};
+
 struct csi_com_status_get_ind
 {
     u64_l time_stamp;
@@ -3138,7 +3174,7 @@ struct mm_set_suspend_req
     /// @wifi_suspend_state
     u8_l  suspend_state;
     /// wow filters
-    u8_l  filter;
+    u16_l  filter;
 };
 
 #define WOW_PATTERN_SIZE 52
@@ -3247,7 +3283,7 @@ struct set_efuse_req
 
 struct fw_reset_req
 {
-    u8_l vif_idx;
+    uint32_t mode;
 };
 
 struct set_macbypass
@@ -3262,6 +3298,14 @@ struct set_stop_macbypass
 {
     u8_l vif_idx;
 };
+
+struct cca_timer_t
+{
+    int high_timeout;
+    int very_high_timeout;
+    int cycle;
+};
+
 
 struct scanu_sched_scan_stop_req
 {
@@ -3424,6 +3468,14 @@ struct csi_set_req
     u32_l protocol_mode;
 };
 
+struct csi_set_runtime_req
+{
+    u16_l sample_time_interval;
+    u16_l ping_time_interval;
+    u32_l time_total;
+    u32_l gateway_ip;
+};
+
 struct early_bcn
 {
     //1: open, 0: close
@@ -3459,6 +3511,12 @@ enum nan_msg_tag
     NAN_MAX,
 };
 #endif
+
+//enable suspend fw trace
+struct suspend_fw_trace_mode
+{
+    int fw_trace_enable;
+};
 
 /// Structure containing the parameters of the @ref MDNS_SET_STATE message.
 struct mm_mdns_offload_state {
@@ -3538,5 +3596,37 @@ struct mm_mdns_passthrough_list {
     uint32_t length;
     uint8_t qname[MDNS_QNAME_LENGTH_MAX];
 };
+
+struct priv_rxfail_cfm
+{
+    uint32_t cnt;
+};
+
+struct mm_set_cfg_req
+{
+    u8_l vht_bfee;
+    u8_l vht_mubfee;
+    u8_l bw;
+    u8_l retry_cnt;
+};
+
+struct set_custom_req
+{
+    u8_l custom_ver;
+};
+
+struct add_default_key
+{
+    uint8_t vif_idx;
+    uint8_t key_index;
+    bool    unicast;
+    bool    multicast;
+};
+
+struct mm_set_suspend_cfm {
+    uint8_t reason;
+};
 #endif // LMAC_MSG_H_
+
+
 

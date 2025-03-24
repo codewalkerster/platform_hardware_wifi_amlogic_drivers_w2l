@@ -12,6 +12,7 @@
 #define P2P_ATT_BODY_OFT            3
 #define P2P_NEG_RSP_DROP_TIME       10
 #define WFD_IE_OUI_TYPE             0x0a
+#define DIRECT_SSID_LEN             7
 
 enum p2p_attr_id
 {
@@ -68,5 +69,6 @@ extern void aml_change_p2p_chanlist(struct aml_vif *vif, u8 *buf, u32 frame_len,
 extern void aml_change_p2p_intent(struct aml_vif *vif, u8 *buf, u32 frame_len,u32* frame_len_offset);
 extern void aml_change_p2p_operchan(struct aml_vif *vif, u8 *buf, u32 frame_len, struct cfg80211_chan_def chan_def);
 
+void aml_rx_parse_p2p_chan_list(u8 *buf, u32 frame_len);
 
 #endif /* _AML_P2P_H_ */

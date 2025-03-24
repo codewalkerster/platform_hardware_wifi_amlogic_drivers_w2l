@@ -50,7 +50,7 @@ extern struct mutex auc_usb_mutex;
 /*Macro for Write/Read reg via endpoin 0*/
 //#define REG_CTRL_EP0
 
-#define AML_USB_CONTROL_MSG_TIMEOUT 3000
+#define AML_USB_CONTROL_MSG_TIMEOUT 1000
 
 /* USB request types */
 #define AML_USB_REQUEST          ( USB_TYPE_VENDOR | USB_RECIP_DEVICE )
@@ -118,6 +118,7 @@ struct aml_hwif_usb {
 
 int aml_usb_insmod(void);
 struct urb * auc_alloc_urb(int iso_packets, gfp_t mem_flags);
+bool usb_bus_available(void);
 
 #define CHIP_FUNCTION_DISABLE_154 BIT(0)
 #define CHIP_FUNCTION_DISABLE_11AX BIT(1)

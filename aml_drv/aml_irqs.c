@@ -7,6 +7,9 @@
  *
  ******************************************************************************
  */
+
+#define AML_MODULE     IRQ
+
 #include <linux/interrupt.h>
 #include "aml_defs.h"
 #include "ipc_host.h"
@@ -16,12 +19,14 @@
 
 extern struct aml_pm_type g_wifi_pm;
 extern struct aml_bus_state_detect bus_state_detect;
+int aml_dat1_irq_handler(struct aml_hw *aml_hw);
 u32 irq_handler_done;
 
+#ifdef SDIO_MODE_ON
 void aml_sdio_dat1_release(struct aml_hw *aml_hw)
 {
     while (!irq_handler_done) {
-        AML_PRINT(AML_DBG_MODULES_IRQ, "irq release need wait !!!\n");
+        AML_RLMT_ERR("irq release need wait !!!\n");
         usleep_range(2,3);
     }
 
@@ -29,7 +34,7 @@ void aml_sdio_dat1_release(struct aml_hw *aml_hw)
     sdio_claim_host(func);
     sdio_release_irq(func);
     sdio_release_host(func);
-    AML_PRINT(AML_DBG_MODULES_IRQ, "irq release\n");
+    AML_RLMT_INFO("irq release\n");
 }
 
 void aml_sdio_dat1_claim(struct aml_hw *aml_hw)
@@ -39,7 +44,7 @@ void aml_sdio_dat1_claim(struct aml_hw *aml_hw)
     sdio_claim_host(func);
     sdio_claim_irq(func, aml_irq_sdio_hdlr_for_pt);
     sdio_release_host(func);
-    AML_PRINT(AML_DBG_MODULES_IRQ, "irq claim\n");
+    AML_RLMT_INFO("irq claim\n");
 }
 
 void aml_enable_sdio_irq(struct aml_hw *aml_hw)
@@ -62,32 +67,13 @@ u32 aml_disable_sdio_irq(struct aml_hw *aml_hw)
     aml_hw->plat->hif_sdio_ops->hi_desc_read((unsigned char *)(unsigned long)reg_data,
             (unsigned char *)(unsigned long)RG_WIFI_IF_FW2HST_IRQ_CFG , sizeof(reg_data));
 
-    AML_PRINT(AML_DBG_MODULES_IRQ, "irq status 0x%08x\n", reg_data[1]);
+    AML_RLMT_INFO("irq status 0x%08x, new pos 0x%08x\n", reg_data[1], reg_data[0]);
     return reg_data[1];
-}
-
-void aml_irq_usb_hdlr(struct urb *urb)
-{
-    struct aml_hw *aml_hw = (struct aml_hw *)(urb->context);
-
-    if (atomic_read(&g_wifi_pm.bus_suspend_cnt) || atomic_read(&g_wifi_pm.is_shut_down))
-    {
-        return;
-    }
-    urb->status = 0;
-    up(&aml_hw->aml_irq_sem);
-    return;
 }
 
 irqreturn_t aml_irq_sdio_hdlr(int irq, void *dev_id)
 {
     struct aml_hw *aml_hw = (struct aml_hw *)dev_id;
-
-    aml_hw->irq_cnt++;
-    if (aml_hw->irq_cnt > 1500)
-        AML_PRINT(AML_DBG_MODULES_IRQ, "irq cnt = %d, irq done = %d, irq status = 0x%08x, irq consume = %ld\n",
-            aml_hw->irq_cnt, aml_hw->irq_done, aml_hw->irq_status, jiffies_to_msecs(jiffies - aml_hw->irq_consume));
-
     if (atomic_read(&g_wifi_pm.bus_suspend_cnt) || atomic_read(&g_wifi_pm.is_shut_down))
     {
         return IRQ_HANDLED;
@@ -114,13 +100,6 @@ void aml_irq_sdio_hdlr_for_pt(struct sdio_func *func)
     }
 
     sdio_release_host(func);
-
-    aml_hw->irq_cnt++;
-    if (aml_hw->irq_cnt > 1500)
-        AML_PRINT(AML_DBG_MODULES_IRQ, "irq cnt = %d, irq done = %d, irq status = 0x%08x, irq consume = %ld\n",
-            aml_hw->irq_cnt, aml_hw->irq_done, aml_hw->irq_status, jiffies_to_msecs(jiffies - aml_hw->irq_consume));
-
-
     if (aml_hw->irq_done)
     {
         aml_hw->irq_done = 0;
@@ -132,6 +111,19 @@ void aml_irq_sdio_hdlr_for_pt(struct sdio_func *func)
     irq_handler_done = 1;
     return;
 }
+#endif
+void aml_irq_usb_hdlr(struct urb *urb)
+{
+    struct aml_hw *aml_hw = (struct aml_hw *)(urb->context);
+
+    if (atomic_read(&g_wifi_pm.bus_suspend_cnt) || atomic_read(&g_wifi_pm.is_shut_down))
+    {
+        return;
+    }
+    urb->status = 0;
+    up(&aml_hw->aml_irq_sem);
+    return;
+}
 
 int aml_dat1_irq_handler(struct aml_hw *aml_hw)
 {
@@ -141,11 +133,7 @@ int aml_dat1_irq_handler(struct aml_hw *aml_hw)
 
     REG_SW_SET_PROFILING(aml_hw, SW_PROF_AML_IPC_IRQ_HDLR);
 
-    aml_hw->irq_consume = jiffies;
     while (status = aml_hw->plat->ack_irq(aml_hw)) {
-
-        aml_hw->irq_cnt = 0;
-        aml_hw->irq_status = status;
 
         if (aml_hw->aml_irq_task_quit) {
             break;
@@ -162,12 +150,11 @@ int aml_dat1_irq_handler(struct aml_hw *aml_hw)
     spin_lock_bh(&aml_hw->tx_lock);
     aml_hwq_process_all(aml_hw);
     spin_unlock_bh(&aml_hw->tx_lock);
-
+#ifdef SDIO_MODE_ON
     if (aml_bus_type == SDIO_MODE) {
         aml_enable_sdio_irq(aml_hw);
-        aml_hw->irq_status = 0;
     }
-
+#endif
     REG_SW_CLEAR_PROFILING(aml_hw, SW_PROF_AML_IPC_IRQ_HDLR);
 
     return 0;
@@ -177,6 +164,7 @@ int aml_irq_task(void *data)
 {
     struct aml_hw *aml_hw = (struct aml_hw *)data;
     u32 status;
+    u32 urb_consume;
     int ret = 0;
     struct sched_param sch_param;
     int try_cnt = 0;
@@ -189,7 +177,7 @@ int aml_irq_task(void *data)
         /* wait for work */
         if (down_interruptible(&aml_hw->aml_irq_sem) != 0) {
             /* interrupted, exit */
-            AML_PRINT(AML_DBG_MODULES_IRQ, "wait aml_task_sem fail!\n");
+            AML_RLMT_ERR("wait aml_task_sem fail!\n");
             break;
         }
 
@@ -198,12 +186,8 @@ int aml_irq_task(void *data)
             break;
         }
 
-        aml_hw->irq_consume = jiffies;
+        urb_consume = jiffies;
         while (status = aml_hw->plat->ack_irq(aml_hw)) {
-
-            aml_hw->irq_cnt = 0;
-            aml_hw->irq_status = status;
-
             if (aml_hw->aml_irq_task_quit) {
                 break;
             }
@@ -220,11 +204,7 @@ int aml_irq_task(void *data)
         aml_hwq_process_all(aml_hw);
         spin_unlock_bh(&aml_hw->tx_lock);
 
-        if (aml_bus_type == SDIO_MODE) {
-            aml_enable_sdio_irq(aml_hw);
-            aml_hw->irq_status = 0;
-
-        } else if ((aml_bus_type == USB_MODE)
+        if ((aml_bus_type == USB_MODE)
 #ifdef CONFIG_AML_RECOVERY
         && !bus_state_detect.bus_err
 #endif
@@ -233,7 +213,15 @@ int aml_irq_task(void *data)
             USB_BEGIN_LOCK();
             if ((atomic_read(&g_wifi_pm.bus_suspend_cnt) == 0) && (atomic_read(&g_wifi_pm.is_shut_down) == 0) &&
                 (atomic_read(&g_wifi_pm.drv_suspend_cnt) == 0)) {
-                ret = usb_submit_urb(aml_hw->g_urb, GFP_ATOMIC);
+                if (aml_hw->g_urb->status != -EINPROGRESS)
+                {
+                    if (!aml_hw->usb_rst_test) {
+                        if (jiffies_to_msecs(jiffies - urb_consume) > 500)
+                            AML_RLMT_ERR("urb consume %ld\n", jiffies_to_msecs(jiffies - urb_consume));
+
+                        ret = usb_submit_urb(aml_hw->g_urb, GFP_ATOMIC);
+                    }
+                }
             } else {
                 ret = 0;
             }
@@ -248,9 +236,10 @@ int aml_irq_task(void *data)
                         up(&aml_hw->aml_irq_sem);
                 } else {
 #ifdef CONFIG_AML_RECOVERY
-                    if ((atomic_read(&g_wifi_pm.bus_suspend_cnt) == 0) && (atomic_read(&g_wifi_pm.is_shut_down) == 0) &&
-                        (atomic_read(&g_wifi_pm.drv_suspend_cnt) == 0))
-                        bus_state_detect.bus_err = 1;
+                    //if ((atomic_read(&g_wifi_pm.bus_suspend_cnt) == 0) && (atomic_read(&g_wifi_pm.is_shut_down) == 0) &&
+                    //    (atomic_read(&g_wifi_pm.drv_suspend_cnt) == 0))
+                    //    bus_state_detect.bus_err = 1;
+
 #endif
                     ERROR_DEBUG_OUT("usb_submit_urb failed(%d), try cnt %d\n", ret, try_cnt);
                 }
@@ -258,7 +247,11 @@ int aml_irq_task(void *data)
                 try_cnt = 0;
             }
         }
-
+#ifdef SDIO_MODE_ON
+        else if(aml_bus_type == SDIO_MODE) {
+            aml_enable_sdio_irq(aml_hw);
+        }
+#endif
         REG_SW_CLEAR_PROFILING(aml_hw, SW_PROF_AML_IPC_IRQ_HDLR);
     }
     if (aml_hw->aml_irq_completion_init) {

@@ -60,9 +60,9 @@ static u8 *scc_bcn_buf = NULL;  //used in new channel
 static u8 *scc_csa_bcn = NULL;  //used in old channel, add csa ie
 
 /*p2p related*/
-u8 g_scc_p2p_save[500] = {0,};
-u8 g_scc_p2p_len_before = 0;
-u8 g_scc_p2p_len_diff = 0;
+u8 g_scc_p2p_save[MAX_P2P_SAVE_LEN] = {0,};
+u32 g_scc_p2p_len_before = 0;
+u32 g_scc_p2p_len_diff = 0;
 bool g_scc_p2p_peer_5g_support = 0;
 
 char chan_width_trace[][35] = {
@@ -152,9 +152,11 @@ int aml_scc_change_beacon(struct aml_hw *aml_hw,struct aml_vif *vif)
         } else if (aml_bus_type == USB_MODE) {
             addr = TXL_BCN_POOL  + (vif->vif_index * (BCN_TXLBUF_TAG_LEN + NX_BCNFRAME_LEN)) + BCN_TXLBUF_TAG_LEN;
             aml_hw->plat->hif_ops->hi_write_sram((unsigned char *)scc_bcn_buf, (unsigned char *)(unsigned long)addr, bcn->len, USB_EP4);
+#ifdef SDIO_MODE_ON
         } else if (aml_bus_type == SDIO_MODE) {
             addr = TXL_BCN_POOL  + (vif->vif_index * (BCN_TXLBUF_TAG_LEN + NX_BCNFRAME_LEN)) + BCN_TXLBUF_TAG_LEN;
             aml_hw->plat->hif_sdio_ops->hi_random_ram_write((unsigned char *)scc_bcn_buf, (unsigned char *)(unsigned long)addr, bcn->len);
+#endif
         }
 
         // Forward the information to the LMAC
@@ -233,7 +235,7 @@ int aml_scc_change_beacon_ht_ie(struct wiphy *wiphy, struct net_device *dev, str
             case NL80211_CHAN_WIDTH_20:
             case NL80211_CHAN_WIDTH_40:
                 vhtop->chan_width = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+#if CFG80211_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
                 vhtop->center_freq_seg0_idx = 0;
                 vhtop->center_freq_seg1_idx = 0;
 #else
@@ -246,13 +248,13 @@ int aml_scc_change_beacon_ht_ie(struct wiphy *wiphy, struct net_device *dev, str
             case NL80211_CHAN_WIDTH_80P80:
                 vhtop->chan_width = 1;
                 if (target_chdef.center_freq1)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+#if CFG80211_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
                     vhtop->center_freq_seg0_idx = aml_ieee80211_freq_to_chan(target_chdef.center_freq1, target_chdef.chan->band);
 #else
                     vhtop->center_freq_seg1_idx = aml_ieee80211_freq_to_chan(target_chdef.center_freq1, target_chdef.chan->band);
 #endif
                 if (target_chdef.center_freq2)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+#if CFG80211_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
                     vhtop->center_freq_seg1_idx = aml_ieee80211_freq_to_chan(target_chdef.center_freq2, target_chdef.chan->band);
 #else
                     vhtop->center_freq_seg2_idx = aml_ieee80211_freq_to_chan(target_chdef.center_freq2, target_chdef.chan->band);
@@ -270,9 +272,11 @@ int aml_scc_change_beacon_ht_ie(struct wiphy *wiphy, struct net_device *dev, str
     } else if (aml_bus_type == USB_MODE) {
         addr = TXL_BCN_POOL  + (vif->vif_index * (BCN_TXLBUF_TAG_LEN + NX_BCNFRAME_LEN)) + BCN_TXLBUF_TAG_LEN;
         aml_hw->plat->hif_ops->hi_write_sram((unsigned char *)scc_bcn_buf, (unsigned char *)(unsigned long)addr, bcn->len, USB_EP4);
+#ifdef SDIO_MODE_ON
     } else if (aml_bus_type == SDIO_MODE) {
         addr = TXL_BCN_POOL  + (vif->vif_index * (BCN_TXLBUF_TAG_LEN + NX_BCNFRAME_LEN)) + BCN_TXLBUF_TAG_LEN;
         aml_hw->plat->hif_sdio_ops->hi_random_ram_write((unsigned char *)scc_bcn_buf, (unsigned char *)(unsigned long)addr, bcn->len);
+#endif
     }
 
     // Forward the information to the LMAC
@@ -348,8 +352,13 @@ void aml_scc_csa_finish(struct work_struct *ws)
          if (aml_scc_change_beacon_ht_ie(vif->aml_hw->wiphy,vif->ndev,csa->chandef)) {
             AML_INFO("bcn change ht ie fail\n");
         }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+        mutex_lock(&vif->wdev.wiphy->mtx);
+        __acquire(&vif->wdev.wiphy->mtx);
+#else
         mutex_lock(&vif->wdev.mtx);
         __acquire(&vif->wdev.mtx);
+#endif
         spin_lock_bh(&aml_hw->cb_lock);
         aml_chanctx_unlink(vif);
         aml_chanctx_link(vif, csa->ch_idx, &csa->chandef);
@@ -360,8 +369,13 @@ void aml_scc_csa_finish(struct work_struct *ws)
             aml_txq_vif_stop(vif, AML_TXQ_STOP_CHAN, aml_hw);
         spin_unlock_bh(&aml_hw->cb_lock);
         aml_cfg80211_ch_switch_notify(vif->ndev, &csa->chandef, 0);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+        mutex_unlock(&vif->wdev.wiphy->mtx);
+        __release(&vif->wdev.wiphy->mtx);
+#else
         mutex_unlock(&vif->wdev.mtx);
         __release(&vif->wdev.mtx);
+#endif
     }
     kfree(csa);
     vif->ap.csa = NULL;
@@ -626,9 +640,11 @@ static int aml_scc_channel_switch(struct aml_hw *aml_hw, struct aml_vif *vif, st
     } else if (aml_bus_type == USB_MODE) {
         addr = TXL_BCN_POOL  + (vif->vif_index * (BCN_TXLBUF_TAG_LEN + NX_BCNFRAME_LEN)) + BCN_TXLBUF_TAG_LEN;
         aml_hw->plat->hif_ops->hi_write_sram((unsigned char *)bcn_buf, (unsigned char *)(unsigned long)addr, bcn->len + idx, USB_EP4);
+#ifdef SDIO_MODE_ON
     } else if (aml_bus_type == SDIO_MODE) {
         addr = TXL_BCN_POOL  + (vif->vif_index * (BCN_TXLBUF_TAG_LEN + NX_BCNFRAME_LEN)) + BCN_TXLBUF_TAG_LEN;
         aml_hw->plat->hif_sdio_ops->hi_random_ram_write((unsigned char *)bcn_buf, (unsigned char *)(unsigned long)addr, bcn->len + idx);
+#endif
     }
 
     csa = kzalloc(sizeof(struct aml_csa), GFP_KERNEL);
@@ -711,7 +727,12 @@ void aml_scc_check_chan_conflict(struct aml_hw *aml_hw)
                     break;
                 }
 
-                if ((target_chdef.chan->flags & IEEE80211_CHAN_RADAR) && (AML_VIF_TYPE(vif) == NL80211_IFTYPE_P2P_GO)) {
+                if (AML_VIF_TYPE(vif) == NL80211_IFTYPE_P2P_GO) {
+                    AML_INFO("GO mode do not switch scc\n");
+                    break;
+                }
+
+                if (target_chdef.chan->flags & IEEE80211_CHAN_RADAR) {
                     AML_INFO("target is radar chan");
                     break;
                 }
@@ -827,4 +848,3 @@ void aml_scc_p2p_action_restore(u8 *buf, u32* len_diff)
         g_scc_p2p_len_before = 0;
     }
 }
-

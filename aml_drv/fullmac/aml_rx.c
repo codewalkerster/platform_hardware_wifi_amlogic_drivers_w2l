@@ -7,10 +7,14 @@
  *
  ******************************************************************************
  */
+
+#define  AML_MODULE    RX
+
 #include <linux/dma-mapping.h>
 #include <linux/ieee80211.h>
 #include <linux/etherdevice.h>
 #include <net/ieee80211_radiotap.h>
+#include <net/ip.h>
 
 #include "aml_recy.h"
 #include "aml_wq.h"
@@ -28,6 +32,9 @@
 #include "wifi_top_addr.h"
 #include "aml_tdls.h"
 #include "aml_rps.h"
+#include "aml_p2p.h"
+
+int aml_last_rx_info(struct aml_hw *priv, struct aml_sta *sta);
 
 struct vendor_radiotap_hdr {
     u8 oui[3];
@@ -35,6 +42,8 @@ struct vendor_radiotap_hdr {
     u16 len;
     u8 data[];
 };
+
+struct hecapa_from_assocreq g_hecapa_from_assocreq = {0};
 
 /**
  * aml_rx_get_vif - Return pointer to the destination vif
@@ -197,6 +206,53 @@ void aml_rx_defer_skb(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
     rx_cb->vif = aml_vif;
     skb_queue_tail(&aml_hw->defer_rx.sk_list, skb);
     schedule_work(&aml_hw->defer_rx.work);
+}
+
+static u32 aml_rx_ip_signature(struct iphdr *iphdr)
+{
+    struct ipv6hdr *ip6hdr;
+    u32 sign = (u32)ntohs(iphdr->id) << 16;
+    void *hdr = (void *)iphdr + (iphdr->ihl << 2);
+
+    if (iphdr->protocol == IPPROTO_UDP)
+        sign |= ntohs(((struct udphdr *)hdr)->check);
+    else if (iphdr->protocol == IPPROTO_TCP)
+        sign |= ntohs(((struct tcphdr *)hdr)->check);
+
+    return sign;
+}
+
+/* return the first TCP/UDP msdu's IPv4 identification(high 16-bit) and TCP/UDP checksum(low 16-bit) */
+u32 aml_rx_skb_signature(struct sk_buff *skb)
+{
+    struct hw_rxhdr *rxhdr = (struct hw_rxhdr *)(skb->data);
+    int offset = sizeof(*rxhdr);
+
+    while ((offset + sizeof(struct ethhdr)) < skb->len) {
+        struct ethhdr *eth = skb->data + offset;
+        u16 ethertype;
+
+        if (rxhdr->flags_is_amsdu) {
+            u8 *payload = (u8 *)(eth + 1);
+            int len = ntohs(eth->h_proto);
+            unsigned int subframe_len = sizeof(struct ethhdr) + len;
+            u8 padding = (4 - subframe_len) & 0x3;
+
+            if (offset + subframe_len > skb-> len)
+                return 0;   /* sub frame length is invalid */
+
+            ethertype = (payload[6] << 8) | payload[7];
+            if (ethertype == ETH_P_IP && ether_addr_equal(payload, rfc1042_header)) {
+                return aml_rx_ip_signature((struct iphdr *)(payload + 8));
+            }
+            offset += subframe_len + padding;
+        } else if (eth->h_proto == htons(ETH_P_IP)) {
+            return aml_rx_ip_signature((struct iphdr *)(eth + 1));
+        } else {
+            return 0;
+        }
+    }
+    return 0;
 }
 
 /**
@@ -424,6 +480,8 @@ resend_n_forward:
 
         /* forward pkt to upper layer */
         if (forward) {
+            static unsigned long in_time = 0;
+            static unsigned long rx_payload_total = 0;
             if (rx_skb != NULL) {
                 rx_skb->protocol = eth_type_trans(rx_skb, aml_vif->ndev);
                 memset(rx_skb->cb, 0, sizeof(rx_skb->cb));
@@ -440,6 +498,13 @@ resend_n_forward:
             /* Update statistics */
             aml_vif->net_stats.rx_packets++;
             aml_vif->net_stats.rx_bytes += rx_skb->len;
+            if (aml_hw->customer_priv.registering) {
+                if (time_after(jiffies, in_time + HZ)) {
+                    aml_hw->customer_priv.rx_average_rate = (aml_vif->net_stats.rx_bytes - rx_payload_total) >> 17;
+                    in_time = jiffies;
+                    rx_payload_total = aml_vif->net_stats.rx_bytes;
+                }
+            }
 #ifdef CONFIG_AML_NAPI
             if (aml_hw->napi_enable) {
                 __skb_queue_tail(&aml_hw->napi_rx_pending_queue, rx_skb);
@@ -506,7 +571,7 @@ static void aml_rx_assoc_req(struct aml_hw *aml_hw, struct sk_buff *skb)
 }
 
 /**
- * aml_rx_mgmt - Process one 802.11 management frame
+ * aml_rx_mgmt - Process one 802.11 management/control frame
  *
  * @aml_hw: main driver data
  * @aml_vif: vif to upload the buffer to
@@ -524,9 +589,12 @@ static void aml_rx_mgmt(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
 
     if (aml_bus_type != PCIE_MODE) {
         aml_scan_rx(aml_hw, hw_rxhdr, skb);
+        /* actually BAR is a control frame */
+        if (ieee80211_is_back_req(mgmt->frame_control))
+            aml_reo_bar_process(aml_hw, hw_rxhdr->flags_sta_idx, skb);
     }
 
-    sp_ret = aml_filter_sp_mgmt_frame(aml_vif, mgmt, SP_STATUS_RX, skb->len, NULL);
+    sp_ret = aml_filter_sp_mgmt_frame(aml_vif, mgmt, SP_STATUS_RX, skb->len, NULL, 0);
 
     if (sp_ret & AML_GAS_INIT_RSP_FRAME) {
         aml_tx_cfm_wait_rsp(aml_hw, true, __func__, __LINE__);
@@ -576,7 +644,31 @@ static void aml_rx_mgmt(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
         aml_rx_defer_skb(aml_hw, aml_vif, skb);
     } else {
         if (ieee80211_is_assoc_req(mgmt->frame_control) || ieee80211_is_reassoc_req(mgmt->frame_control)) {
+            const u8 *he_cap_ie;
+            u8 ext_id;
+            int var_offset = offsetof(struct ieee80211_mgmt, u.assoc_req.variable);
+
             aml_rx_assoc_req(aml_hw, skb);
+
+            he_cap_ie = cfg80211_find_ie(WLAN_EID_EXTENSION, skb->data + var_offset, skb->len - var_offset);
+            if (he_cap_ie) {
+                ext_id = *(he_cap_ie + 2);
+                if (ext_id == WLAN_EID_EXT_HE_CAPABILITY) {
+                    AML_INFO("Save the HE capa info in Assoc Req or Reassoc Req frames.\n");
+                    memset((void *)&g_hecapa_from_assocreq, 0, sizeof(g_hecapa_from_assocreq));
+                    memcpy(g_hecapa_from_assocreq.he_cap.mac_cap_info, (he_cap_ie + 3), MAC_HE_MAC_CAPA_LEN);
+                    memcpy(g_hecapa_from_assocreq.he_cap.phy_cap_info, (he_cap_ie + 9), MAC_HE_PHY_CAPA_LEN);
+
+                    g_hecapa_from_assocreq.he_cap.mcs_supp.rx_mcs_80 = (*(he_cap_ie + 21) << 8) | *(he_cap_ie + 20);
+                    g_hecapa_from_assocreq.he_cap.mcs_supp.tx_mcs_80 = (*(he_cap_ie + 23) << 8) | *(he_cap_ie + 22);
+                    g_hecapa_from_assocreq.he_cap.mcs_supp.rx_mcs_160 = 0xffff;
+                    g_hecapa_from_assocreq.he_cap.mcs_supp.tx_mcs_160 = 0xffff;
+                    g_hecapa_from_assocreq.he_cap.mcs_supp.rx_mcs_80p80 = 0xffff;
+                    g_hecapa_from_assocreq.he_cap.mcs_supp.tx_mcs_80p80 = 0xffff;
+
+                    memcpy(g_hecapa_from_assocreq.addr, mgmt->sa, ETH_ALEN);
+                }
+            }
         }
         else if (ieee80211_is_public_action(mgmt, skb->len)) {
             u8 oui_subtype;
@@ -1372,17 +1464,7 @@ static int aml_rx_amsdu_free(struct aml_hw *aml_hw, struct hw_rxhdr *rxhdr)
     return res;
 }
 
-
-/**
- * aml_rxdataind - Process rx buffer
- *
- * @pthis: Pointer to the object attached to the IPC structure
- *         (points to struct aml_hw is this case)
- * @arg: Address of the RX descriptor
- *
- * This function is called for each buffer received by the fw
- *
- */
+#ifdef CONFIG_AML_SDIO_USB_FW_REORDER
 struct list_head reorder_list;
 struct list_head free_rxdata_list;
 
@@ -1448,6 +1530,7 @@ void aml_put_rxdata_back_to_free_list(struct rxdata *rxdata)
 {
     list_add_tail(&rxdata->list, &free_rxdata_list);
 }
+#endif
 
 uint8_t aml_scan_find_already_saved(struct aml_hw *aml_hw, struct sk_buff *skb)
 {
@@ -1512,9 +1595,7 @@ void aml_scan_rx(struct aml_hw *aml_hw, struct hw_rxhdr *hw_rxhdr, struct sk_buf
             uint8_t contain = 0;
 
 #ifdef CONFIG_AML_RECOVERY
-            if (aml_recy && aml_recy->link_loss.is_enabled
-                    && aml_recy->link_loss.is_happened)
-                aml_recy->link_loss.scan_result_cnt++;
+            aml_recy->link_loss.scan_result_cnt++;
 #endif
             contain = aml_scan_find_already_saved(aml_hw, skb);
             if (contain)
@@ -1547,6 +1628,9 @@ void aml_scan_rx(struct aml_hw *aml_hw, struct hw_rxhdr *hw_rxhdr, struct sk_buf
             scan_res->scanu_res_ind.payload = (u32_l *)(aml_hw->scanres_payload_buf + aml_hw->scanres_payload_buf_offset);
 
             aml_hw->scanres_payload_buf_offset += le32_to_cpu(hw_rxhdr->hwvect.len);
+            spin_lock_bh(&aml_hw->scan_lock);
+            list_add_tail(&scan_res->list, &aml_hw->scan_res_list);
+            spin_unlock_bh(&aml_hw->scan_lock);
         }
     }
 
@@ -1617,7 +1701,7 @@ static inline struct sk_buff *aml_sdio_usb_rx_skb_from_rxbuf(struct aml_hw *aml_
 
     skb = dev_alloc_skb(sizeof(struct hw_rxhdr) + frame_len);
     if (!skb) {
-        AML_PRINT(AML_DBG_MODULES_RX, "failed to alloc skb! frame len: 0x%x\n", frame_len);
+        AML_RLMT_ERR("failed to alloc skb! frame len: 0x%x\n", frame_len);
         return NULL;
     }
 
@@ -1664,9 +1748,19 @@ static inline struct sk_buff *aml_sdio_usb_rx_skb_from_rxbuf(struct aml_hw *aml_
     if (payl_len2)
         memcpy(data + frame_len, rxbuf->gap + RX_PD_LEN, payl_len2);
 
+    /* copy external info if exists */
+    if (payl_offset >= sizeof(struct aml_rhd_ext)) {
+        struct aml_rhd_ext *ext = (struct aml_rhd_ext *)(pos - payl_offset);
+
+        *AML_RHD_EXT(skb->data) = *ext;
+    } else {
+        *AML_RHD_EXT(skb->data) = (struct aml_rhd_ext){};
+    }
+
     return skb;
 }
 
+int g_sta_idx = AML_INVALID_STA;
 static s8 aml_sdio_usb_rx_skb_handle(struct aml_hw *aml_hw,
                                      struct sk_buff *skb,
                                      enum rx_status_bits rx_status)
@@ -1674,12 +1768,21 @@ static s8 aml_sdio_usb_rx_skb_handle(struct aml_hw *aml_hw,
     struct hw_rxhdr *hw_rxhdr = (struct hw_rxhdr *)(skb->data);
     struct aml_vif *aml_vif;
 
-    if (!rx_status) {
+    skb_pull(skb, sizeof(struct hw_rxhdr));
+
+#ifndef CONFIG_AML_SDIO_USB_FW_REORDER
+    if (rx_status == RX_STAT_ALLOC) {
+        AML_INFO("SDIO/USB firmware reorder is enabled, but driver doesn't support!");
         dev_kfree_skb(skb);
         return 0;
     }
+#endif
 
-    skb_pull(skb, sizeof(struct hw_rxhdr));
+    if (!(rx_status & (RX_STAT_FORWARD | RX_STAT_SPURIOUS))) {
+        AML_INFO("invalid rx status %x [%d]: %32ph\n", rx_status, skb->len, skb->data);
+        dev_kfree_skb(skb);
+        return 0;
+    }
 
     spin_lock_bh(&aml_hw->rx_lock);
 
@@ -1756,7 +1859,7 @@ static s8 aml_sdio_usb_rx_skb_handle(struct aml_hw *aml_hw,
         if (skb_monitor != NULL) {
         skb_reset_tail_pointer(skb_monitor);
         skb_monitor->len = 0;
-        //AML_PRINT(AML_DBG_MODULES_RX, "%s  %d skb tail %x \n",__func__,__LINE__,skb->tail);
+        //AML_RLMT_ERR("skb tail %x \n",skb->tail);
         skb_put(skb_monitor, frm_len);
 #if 0  //TODO: SDIO not use ?
 
@@ -1851,6 +1954,15 @@ check_len_update:
     return 0;
 }
 
+void aml_reo_forward(struct aml_hw *aml_hw, struct sk_buff_head *frames)
+{
+    struct sk_buff *skb;
+
+    while ((skb = __skb_dequeue(frames))) {
+        aml_sdio_usb_rx_skb_handle(aml_hw, skb, RX_STAT_FORWARD);
+    }
+}
+
 void aml_dynamic_update_tx_page(struct aml_hw *aml_hw)
 {
     spin_lock_bh(&aml_hw->tx_buf_lock);
@@ -1860,7 +1972,13 @@ void aml_dynamic_update_tx_page(struct aml_hw *aml_hw)
         if (aml_bus_type == SDIO_MODE) {
             aml_hw->g_tx_param.tx_page_free_num = aml_hw->la_enable ? (SDIO_TX_PAGE_NUM_LARGE - SDIO_LA_PAGE_NUM) : SDIO_TX_PAGE_NUM_LARGE;
         } else if (aml_bus_type == USB_MODE) {
-            aml_hw->g_tx_param.tx_page_free_num = aml_hw->la_enable ? (USB_TX_PAGE_NUM_LARGE - USB_LA_PAGE_NUM) : USB_TX_PAGE_NUM_LARGE;
+            if (aml_hw->la_enable) {
+                aml_hw->g_tx_param.tx_page_free_num = (USB_TX_PAGE_NUM_LARGE - USB_LA_PAGE_NUM);
+            } else if (aml_hw->trace_enable) {
+                aml_hw->g_tx_param.tx_page_free_num = (USB_TX_PAGE_NUM_LARGE - USB_TRACE_PAGE_NUM);
+            } else {
+                aml_hw->g_tx_param.tx_page_free_num = USB_TX_PAGE_NUM_LARGE;
+            }
         }
     }
     aml_hw->g_tx_param.tx_page_tot_num = aml_hw->g_tx_param.tx_page_free_num;
@@ -1890,8 +2008,10 @@ static void aml_trigger_rst_rxd(struct aml_hw *aml_hw, uint32_t addr_rst, uint32
         if ((aml_hw->fw_new_pos & ~AML_WRAP) >= rxbuf_end_small_addr) {
             addr_rst = RXBUF_START_ADDR;
             aml_hw->fw_new_pos = RXBUF_START_ADDR;
+#ifdef SDIO_MODE_ON
             if (aml_bus_type == SDIO_MODE)
                 AML_REG_WRITE(RXBUF_START_ADDR & 0x1FFFF, aml_hw->plat, 0, RG_WIFI_IF_FW2HST_IRQ_CFG);
+#endif
         }
         aml_dynamic_update_tx_page(aml_hw);
         addr_rst |= RX_REDUCE_READ_RX_DATA_FINSH;
@@ -1944,9 +2064,12 @@ static void aml_trigger_rst_rxd(struct aml_hw *aml_hw, uint32_t addr_rst, uint32
             } else {
                 aml_hw->plat->hif_ops->hi_write_sram((unsigned char *)cmd_buf, (unsigned char *)(SYS_TYPE)(CMD_DOWN_FIFO_FDH_ADDR), 8, USB_EP4);
             }
-        } else if ((aml_bus_type == SDIO_MODE) && (aml_hw->state == WIFI_SUSPEND_STATE_NONE) && upload_flag) {
+        }
+#ifdef SDIO_MODE_ON
+        if ((aml_bus_type == SDIO_MODE) && (aml_hw->state == WIFI_SUSPEND_STATE_NONE) && upload_flag) {
             aml_hw->plat->hif_sdio_ops->hi_sram_write((unsigned char*)cmd_buf, (unsigned char *)(SYS_TYPE)(CMD_DOWN_FIFO_FDH_ADDR), 8);
         }
+#endif
         last_addr = addr_rst;
     }
 }
@@ -1955,46 +2078,59 @@ static void aml_sdio_usb_dynamic_buffer_check(struct aml_hw *aml_hw)
 {
     if (aml_hw->rx_buf_state & BUFFER_STATUS) {
         if (aml_hw->rx_buf_state & BUFFER_NARROW) {
-            AML_PRINT(AML_DBG_MODULES_RX, "%s,%d:reduce fw_new_pos=%x, fw_buf_pos=%x\n", __func__, __LINE__,
+            AML_INFO("reduce fw_new_pos=%x, fw_buf_pos=%x\n",
                        (aml_hw->fw_new_pos & ~AML_WRAP), (aml_hw->fw_buf_pos & ~AML_WRAP));
 
             if ((aml_hw->rx_buf_state & BUFFER_UPDATE_FLAG) == 0) {
                 aml_hw->rx_buf_state |= BUFFER_UPDATE_FLAG;
                 return;
             }
+#ifdef SDIO_MODE_ON
             if (aml_bus_type == SDIO_MODE) {
                 aml_hw->rx_buf_end = RXBUF_END_ADDR_SMALL;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0) // template solution for S905L3A
                 aml_rps_switch_check(aml_hw, RPS_ON);
 #endif
-            } else {
+            } else
+#endif
+            {
                 aml_hw->rx_buf_end = USB_RXBUF_END_ADDR_SMALL;
             }
             aml_hw->rx_buf_state &= ~(BUFFER_STATUS);
             aml_hw->rx_buf_state &= ~(BUFFER_UPDATE_FLAG);
             aml_hw->rx_buf_state |= BUFFER_REDUCE_FINSH;
-            AML_PRINT(AML_DBG_MODULES_RX, "%s,%d:reduce_finsh rx_buf_state = %x\n", __func__, __LINE__, aml_hw->rx_buf_state);
+            AML_INFO("reduce_finish rx_buf_state = %x\n" , aml_hw->rx_buf_state);
         } else if (aml_hw->rx_buf_state & BUFFER_EXPAND) {
-            AML_PRINT(AML_DBG_MODULES_RX, "%s,%d:expend fw_new_pos=%x, fw_buf_pos=%x\n", __func__, __LINE__,
+            AML_INFO("expend fw_new_pos=%x, fw_buf_pos=%x\n",
                 (aml_hw->fw_new_pos & ~AML_WRAP), (aml_hw->fw_buf_pos & ~AML_WRAP));
             if ((aml_hw->rx_buf_state & BUFFER_UPDATE_FLAG) == 0) {
                 aml_hw->rx_buf_state |= BUFFER_UPDATE_FLAG;
                 return;
             }
 
+#ifdef SDIO_MODE_ON
             if (aml_bus_type == SDIO_MODE) {
                 aml_hw->rx_buf_end = (aml_hw->la_enable) ? RXBUF_END_ADDR_LA_LARGE : RXBUF_END_ADDR_LARGE;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0) // template solution for S905L3A
                 aml_rps_switch_check(aml_hw, RPS_OFF);
 #endif
-            } else{
-                aml_hw->rx_buf_end = (aml_hw->la_enable) ? USB_RXBUF_END_ADDR_LA_LARGE : USB_RXBUF_END_ADDR_LARGE;
+            } else
+#endif
+
+            {
+                if (aml_hw->la_enable) {
+                    aml_hw->rx_buf_end = USB_RXBUF_END_ADDR_LA_LARGE;
+                } else if (aml_hw->trace_enable) {
+                    aml_hw->rx_buf_end = USB_RXBUF_END_ADDR_TRACE_LARGE;
+                } else {
+                    aml_hw->rx_buf_end = USB_RXBUF_END_ADDR_LARGE;
+                }
             }
 
             aml_hw->rx_buf_state &= ~(BUFFER_STATUS);
             aml_hw->rx_buf_state &= ~(BUFFER_UPDATE_FLAG);
             aml_hw->rx_buf_state |= BUFFER_EXPEND_FINSH;
-            AML_PRINT(AML_DBG_MODULES_RX, "%s,%d:enlarge_finsh rx_buf_state = %x\n", __func__, __LINE__, aml_hw->rx_buf_state);
+            AML_INFO("enlarge_finish rx_buf_state = %x\n", aml_hw->rx_buf_state);
         }
     }
 }
@@ -2014,7 +2150,7 @@ void aml_rxbuf_list_init(struct aml_hw *aml_hw)
         aml_hw->rxbuf_list[i].rxbuf = (u8 *)aml_hw->rxbufs + i * RXBUF_SIZE;
         list_add_tail(&aml_hw->rxbuf_list[i].list, &aml_hw->rxbuf_free_list);
      }
-    AML_PRINT(AML_DBG_MODULES_RX, "%s host_buf:%08x\n", __func__, aml_hw->rxbufs);
+    AML_RLMT_INFO("host_buf:%08x\n", aml_hw->rxbufs);
 
 #ifdef CONFIG_SDIO_RX_AUTO_INT
     incomplete_temp_list.rxbuf =(u8 *)kmalloc(WLAN_AML_HW_TEMP_RX_SIZE, GFP_KERNEL);
@@ -2137,10 +2273,12 @@ extern struct aml_bus_state_detect bus_state_detect;
 
 static inline void hi_rx_buffer_read(struct aml_hw *aml_hw, u8 *buf, u32 addr, unsigned int len)
 {
+#ifdef SDIO_MODE_ON
     if (aml_bus_type == SDIO_MODE)
         aml_hw->plat->hif_sdio_ops->hi_rx_buffer_read(buf, (unsigned char *)addr, len, 0);
     else
-        aml_hw->plat->hif_ops->hi_rx_buffer_read(buf, (unsigned char *)addr, len, USB_EP4);
+#endif
+        aml_hw->plat->hif_ops->hi_rx_buffer_read(buf, (unsigned char *)addr, len, USB_EP6);
 }
 
 static s8 aml_sdio_usb_rxdataind(struct aml_hw *aml_hw)
@@ -2151,9 +2289,18 @@ static s8 aml_sdio_usb_rxdataind(struct aml_hw *aml_hw)
     REG_SW_SET_PROFILING(aml_hw, SW_PROF_AMLDATAIND);
 
     while (list_empty(&aml_hw->rxbuf_free_list)) {
-        usleep_range(2,3);
+        if (aml_hw->rx_buf_state & BUFFER_STATUS) {
+            usleep_range(2, 3);
+
+        } else {
+            aml_hw->irq_pending |= IPC_IRQ_E2A_RXDESC;
+            if (aml_bus_type == USB_MODE)
+                AML_RLMT_ERR("rx buf empty\n");
+            return -1;
+        }
     }
 
+    aml_hw->irq_pending &= ~(IPC_IRQ_E2A_RXDESC);
     if (aml_hw->fw_buf_pos != aml_hw->fw_new_pos) {
         struct rxbuf_list *rxbuf = aml_get_rxbuf_list_from_free_list(aml_hw);
 
@@ -2162,9 +2309,23 @@ static s8 aml_sdio_usb_rxdataind(struct aml_hw *aml_hw)
             uint32_t second_len;
             uint32_t recv_pkt_len;
 
+            #if 1
+            if (rxbuf->pkt_cnt > 100)
+                AML_RLMT_INFO("buf:%08x, data len: %d, pkt cnt %d, rxbuf consume:%ld ms\n",
+                    rxbuf->rxbuf,
+                    rxbuf->end - rxbuf->rxbuf,
+                    rxbuf->pkt_cnt,
+                    div_u64((rxbuf->rxbuf_end_time - rxbuf->rxbuf_start_time), 1000000));
+            #endif
+
             /* host rxbuf dynamic switch */
             aml_sdio_usb_dynamic_buffer_check(aml_hw);
             rxbuf->rx_buf_end = aml_hw->rx_buf_end;
+
+            if (fw_new_pos < RXBUF_START_ADDR || fw_new_pos >= rxbuf->rx_buf_end) {
+                AML_INFO("fw_new_pos 0x%08x, fw_buf_pos 0x%08x\n", fw_new_pos, fw_buf_pos);
+                return -1;
+            }
 
             /*
              * if the remainder space of rx ring is not enough for a rx desc,
@@ -2187,6 +2348,7 @@ static s8 aml_sdio_usb_rxdataind(struct aml_hw *aml_hw)
             }
             BUG_ON(first_len < RX_DESC_SIZE);
 
+#ifdef SDIO_MODE_ON
 #ifdef CONFIG_SDIO_RX_AUTO_INT
 /* FIXME: get block size from SDIO host control driver */
 #define SDIO_BLOCK_SIZE     (1U << 9)               // 512
@@ -2208,6 +2370,7 @@ static s8 aml_sdio_usb_rxdataind(struct aml_hw *aml_hw)
                     /* FIXME: rxbuf->rxbuf_data_end -= mod; ??? */
                 }
             }
+#endif
 #endif
             /* set host memory pointers */
             rxbuf->pos = rxbuf->rxbuf;
@@ -2240,6 +2403,7 @@ static s8 aml_sdio_usb_rxdataind(struct aml_hw *aml_hw)
     return -1;
 }
 
+#ifdef CONFIG_AML_SDIO_USB_FW_REORDER
 static void aml_sdio_usb_reorder_list_check(struct aml_hw *aml_hw, struct fw_reo_info *reo)
 {
     struct rxdata *rxdata = NULL;
@@ -2274,7 +2438,7 @@ static void aml_sdio_usb_fw_reorder_handle(struct aml_hw *aml_hw, const struct r
 
     /*
      * NB: handle the reorder instruction embedded in rxdesc, or received by e2a msg here.
-     * but the handling sequence can't be garenteed same as it's generated in firmware.
+     * but the handling sequence can't be guaranteed same as it's generated in firmware.
      * it introduces the out-of-order issue.
      *
      * Therefore, for USB/SDIO, host reorder is preferred.
@@ -2297,6 +2461,7 @@ static void aml_sdio_usb_fw_reorder_handle(struct aml_hw *aml_hw, const struct r
         spin_unlock_bh(&aml_hw->reorder_lock);
     }
 }
+#endif
 
 #ifdef CONFIG_SDIO_TX_ENH
 #ifdef SDIO_TX_ENH_DBG
@@ -2329,7 +2494,7 @@ int aml_rx_task(void *data)
         /* wait for work */
         if (down_interruptible(&aml_hw->aml_rx_sem) != 0) {
             /* interrupted, exit */
-            AML_PRINT(AML_DBG_MODULES_RX, "%s:%d wait aml_rx_sem fail!\n", __func__, __LINE__);
+            AML_RLMT_ERR(" wait aml_rx_sem fail!\n");
             break;
         }
         if (aml_hw->aml_rx_task_quit) {
@@ -2422,7 +2587,7 @@ int aml_rx_task(void *data)
                 buf_framlen = *frame_len_ptr + RX_PAYLOAD_OFFSET;
 
                 if (*next_fw_pkt > temp_list->rx_buf_end || *next_fw_pkt < RXBUF_START_ADDR) {
-                    AML_PRINT(AML_DBG_MODULES_RX, "=======error:invalid address %08x, start:%08x, end:%08x, fw_pre_pos: %x, fw_new_pos: %x, last_fw_pos: %x offset:%d frame_len:%d\n",
+                    AML_RLMT_ERR("=======error:invalid address %08x, start:%08x, end:%08x, fw_pre_pos: %x, fw_new_pos: %x, last_fw_pos: %x offset:%d frame_len:%d\n",
                         *next_fw_pkt, aml_hw->host_buf_start, aml_hw->host_buf_end,
                         aml_hw->fw_buf_pos, aml_hw->fw_new_pos, aml_hw->last_fw_pos,
                         rxbuf_offset, buf_framlen);
@@ -2523,8 +2688,6 @@ int aml_rx_task(void *data)
 /* SDIO/USB rx task */
 int aml_rx_task(void *data)
 {
-    u32 rx_consume = 0;
-
     struct aml_hw *aml_hw = (struct aml_hw *)data;
 #ifndef CONFIG_PT_MODE
     struct sched_param sch_param;
@@ -2542,7 +2705,7 @@ int aml_rx_task(void *data)
                 continue;
 
             /* interrupted, exit */
-            AML_PRINT(AML_DBG_MODULES_RX, "%s:%d wait aml_rx_sem fail!\n", __func__, __LINE__);
+            AML_RLMT_ERR("wait aml_rx_sem fail!\n");
             break;
         }
 
@@ -2552,14 +2715,25 @@ int aml_rx_task(void *data)
 #endif
 #endif
 
-        rx_consume = jiffies;
+        rxbuf->rxbuf_end_time = 0;
+        rxbuf->pkt_cnt = 0;
+        rxbuf->rxbuf_start_time = ktime_get_ns();
         while (!aml_hw->aml_rx_task_quit && rxbuf->pos < rxbuf->end) {
             struct rxdesc *rxdesc = (struct rxdesc *)rxbuf->pos;
+            enum rx_status_bits rx_status = rxdesc->dma_hdrdesc.hd.status;
             struct sk_buff *skb = aml_sdio_usb_rx_skb_from_rxbuf(aml_hw, rxbuf);
+            rxbuf->pkt_cnt++;
 
-            if (jiffies_to_msecs(jiffies - rx_consume) > 50)
-                AML_PRINT(AML_DBG_MODULES_IRQ, "rx task consume %ld, rxbuf pos 0x%08x, rxbuf end 0x%08x\n",
-                    jiffies_to_msecs(jiffies - rx_consume), rxbuf->pos, rxbuf->end);
+           if (g_sta_idx != AML_INVALID_STA && g_sta_idx < (NX_REMOTE_STA_MAX + NX_VIRT_DEV_MAX)) {
+                struct aml_sta *sta = NULL;
+                struct aml_vif *aml_vif = NULL;
+                sta = aml_hw->sta_table + g_sta_idx;
+                /* coverity[remediation] -  hwvect won't cross the line*/
+                aml_vif = aml_rx_get_vif(aml_hw, sta->vif_idx);
+                if (aml_vif && aml_vif->is_sta_mode) {
+                    aml_last_rx_info(aml_hw, sta);
+                }
+           }
 
 #ifdef CONFIG_SDIO_TX_ENH
 #ifdef SDIO_TX_ENH_DBG
@@ -2567,16 +2741,23 @@ int aml_rx_task(void *data)
 #endif
 #endif
 
+#ifdef CONFIG_AML_SDIO_USB_FW_REORDER
+            /* auto-learning, if firmware is configured to reorder in host */
+            if (rx_status == RX_STAT_HOST_REO)
+                aml_sdio_usb_host_reorder_detected(aml_hw);
+#endif
+
             if (!skb) {
                 /* current frame is skipped, or internal error happened. */
-            } else {
-                struct rx_hd *hd = &rxdesc->dma_hdrdesc.hd;
-
-                if (hd->status == RX_STAT_ALLOC) {
+#ifdef CONFIG_AML_SDIO_USB_FW_REORDER
+            } else if (!aml_hw->aml_sdio_usb_host_reorder) {
+                if (rx_status == RX_STAT_ALLOC) {
                     struct rxdata *rxdata = aml_get_rxdata_from_free_list();
 
                     /* add this frame into reorder list */
                     if (rxdata) {
+                        struct rx_hd *hd = &rxdesc->dma_hdrdesc.hd;
+
                         rxdata->skb = skb;
                         rxdata->hostid = hd->hostid;
                         rxdata->tid = hd->reorder.tid;
@@ -2585,13 +2766,50 @@ int aml_rx_task(void *data)
                         dev_kfree_skb(skb);
                     }
                 } else {
-                    aml_sdio_usb_rx_skb_handle(aml_hw, skb, hd->status);
+                    aml_sdio_usb_rx_skb_handle(aml_hw, skb, rx_status);
+                }
+#endif
+            } else {
+                struct hw_rxhdr *rhd = (struct hw_rxhdr *)skb->data;
+                struct aml_rhd_ext *rhd_ext = AML_RHD_EXT(rhd);
+                struct aml_reo_session *reo = NULL;
+
+                /*
+                 * if rx_status != RX_STAT_HOST_REO, the frame is not under a RX BA,
+                 * or it's received before the BA(reo) session is created,
+                 * do not try to get the reo session or handle the frame under it.
+                 */
+                if (rhd_ext->qos && rx_status == RX_STAT_HOST_REO)
+                    reo = aml_reo_session_get(aml_hw, rhd->flags_sta_idx, rhd->flags_user_prio);
+
+                if (reo) {
+                    struct sk_buff_head frames;
+
+                    __skb_queue_head_init(&frames);
+
+                    aml_reo_enqueue(reo, skb, &frames);
+                    aml_reo_session_put(reo);
+
+                    aml_reo_forward(aml_hw, &frames);
+                } else {
+                    if (rx_status == RX_STAT_HOST_REO) {
+                        net_info_ratelimited("got a frame under BA, but no reo session! "
+                                 "forward it by default. sta %u tid %u qos %d sn %u\n",
+                                 rhd->flags_sta_idx, rhd->flags_user_prio,
+                                 rhd_ext->qos, rhd_ext->sn);
+                        rx_status = RX_STAT_FORWARD;
+                    }
+                    aml_sdio_usb_rx_skb_handle(aml_hw, skb, rx_status);
                 }
             }
 
+#ifdef CONFIG_AML_SDIO_USB_FW_REORDER
             /* handle reorder info (reorder instruction from firmware) */
-            aml_sdio_usb_fw_reorder_handle(aml_hw, rxdesc);
+            if (!aml_hw->aml_sdio_usb_host_reorder)
+                aml_sdio_usb_fw_reorder_handle(aml_hw, rxdesc);
+#endif
         }
+        rxbuf->rxbuf_end_time = ktime_get_ns();
 
 #ifdef CONFIG_SDIO_TX_ENH
 #ifdef SDIO_TX_ENH_DBG
@@ -2716,10 +2934,10 @@ struct aml_dyn_snr_cfg g_dyn_snr;
 int aml_last_rx_info(struct aml_hw *priv, struct aml_sta *sta)
 {
     struct aml_rx_rate_stats *rate_stats;
-    int i;
+    int i, id;
     int cpt;
-    u64 high_rate_percent = 0;
-    u32 snr_cfg, old_snr_cfg, change_value;
+    u64 high_rate_percent = 0, rx_bytes = 0;
+    u32 snr_cfg, old_snr_cfg, change_value, trail_time, best_tp = 0;
 
     if (!g_dyn_snr.enable)
         return 0;
@@ -2727,28 +2945,30 @@ int aml_last_rx_info(struct aml_hw *priv, struct aml_sta *sta)
     if (aml_recy != NULL && aml_recy_flags_chk(AML_RECY_STATE_ONGOING))
         return 0;
 #endif
-    if (!g_dyn_snr.need_trial && jiffies < g_dyn_snr.last_time + 3 * HZ)
-        return 0;
-    else if (g_dyn_snr.need_trial && jiffies < g_dyn_snr.last_time + msecs_to_jiffies(100))
-        return 0;
-
-    g_dyn_snr.last_time = jiffies;
     rate_stats = &sta->stats.rx_rate;
     if (rate_stats->table == NULL || gst_rx_rate.table == NULL)
         return 0;
-    change_value = AML_REG_READ(priv->plat, AML_ADDR_SYSTEM, 0xc00828);
-    old_snr_cfg = (change_value >> 29) & 0x3;
+
+    trail_time = 100;
+    if (!g_dyn_snr.need_trial && jiffies < g_dyn_snr.last_time + msecs_to_jiffies(3000)) //3s
+        return 0;
+    else if (g_dyn_snr.need_trial && jiffies < g_dyn_snr.last_time + msecs_to_jiffies(trail_time))
+        return 0;
+
+    rx_bytes = (sta->stats.rx_bytes - g_dyn_snr.rx_byte) >> 17;
+    g_dyn_snr.rx_info.rx_tp[g_dyn_snr.rx_info.trial_cnt] = div_u64(rx_bytes * HZ, (jiffies - g_dyn_snr.last_time));
+
+    g_dyn_snr.last_time = jiffies;
+    g_dyn_snr.rx_byte = sta->stats.rx_bytes;
+    change_value = AML_REG_READ(priv->plat, 0, 0x60c00828);
+    g_dyn_snr.rx_info.snr_cfg[g_dyn_snr.rx_info.trial_cnt] = (change_value >> 29) & 0x3;
 
     cpt = rate_stats->cpt - gst_rx_rate.cpt;
-    if (!g_dyn_snr.need_trial) {
-        g_dyn_snr.rx_byte_1 = sta->stats.rx_bytes - g_dyn_snr.rx_byte;
-    } else {
-        g_dyn_snr.rx_byte_2 = sta->stats.rx_bytes - g_dyn_snr.rx_byte;
-    }
 
-    g_dyn_snr.rx_byte = sta->stats.rx_bytes;
     /* no process when low rx t-puts */
-    if (g_dyn_snr.rx_byte_1 < 10000) {
+    if (g_dyn_snr.rx_info.rx_tp[g_dyn_snr.rx_info.trial_cnt] < 30) {
+        g_dyn_snr.need_trial = false;
+        g_dyn_snr.rx_info.trial_cnt = 0;
         spin_lock_bh(&priv->tx_lock);
         memcpy(gst_rx_rate.table, sta->stats.rx_rate.table,
                 sta->stats.rx_rate.size * sizeof(sta->stats.rx_rate.table[0]));
@@ -2780,42 +3000,62 @@ int aml_last_rx_info(struct aml_hw *priv, struct aml_sta *sta)
                     high_rate_percent += percent;
                 continue;
             } else if (rate_config.formatModTx == FORMATMOD_VHT) {
-                if ((r->vht.nss >= 1) && (r->vht.mcs >= 7)) // VHT
+                if ((r->vht.nss >= 1) && (r->vht.mcs > 8)) // VHT
                     high_rate_percent += percent;
                 continue;
             } else {
-                if ((r->vht.nss >= 1) && (r->vht.mcs >= 8)) // HE_SU/HE_MU
-                    high_rate_percent += percent;
+                if (sta->band == NL80211_BAND_2GHZ) {
+                    if ((r->vht.nss >= 1) && (r->vht.mcs > 10)) // HE_SU/HE_MU
+                        high_rate_percent += percent;
+                } else {
+                    if ((r->vht.nss >= 1) && (r->vht.mcs > 8)) // HE_SU/HE_MU
+                        high_rate_percent += percent;
+                }
                 continue;
             }
         }
     }
 
-    /* high rate percent is greater than 60%
-       or rx byte with current cfg is greater than rx byte with previous cfg */
-    if ((high_rate_percent >= g_dyn_snr.snr_mcs_ration * 10)
-            || (g_dyn_snr.need_trial && (div_u64(g_dyn_snr.rx_byte_1, 30) < div_u64(g_dyn_snr.rx_byte_2 * 102, 100)))) {
-        //keep current configuration
-        g_dyn_snr.best_snr_cfg = old_snr_cfg;
-        if (g_dyn_snr.need_trial)
+    if (high_rate_percent >= g_dyn_snr.snr_mcs_ration * 10) {
+       //keep current configuration
+        g_dyn_snr.best_snr_cfg = g_dyn_snr.rx_info.snr_cfg[g_dyn_snr.rx_info.trial_cnt];
+        if (g_dyn_snr.need_trial) {
             g_dyn_snr.need_trial = false;
-    } else if (high_rate_percent < g_dyn_snr.snr_mcs_ration * 10) {
-        if (!g_dyn_snr.need_trial) {
-            //recode current snr cfg
-            g_dyn_snr.best_snr_cfg = old_snr_cfg;
-
-            get_random_bytes(&snr_cfg, 1);
-            snr_cfg &= 0x3;
-            if (snr_cfg == old_snr_cfg)
-                snr_cfg = (old_snr_cfg + 1) & 0x3;
-            g_dyn_snr.need_trial = true;
-        } else {
-            snr_cfg = g_dyn_snr.best_snr_cfg;
-            g_dyn_snr.need_trial = false;
+            g_dyn_snr.rx_info.trial_cnt = 0;
         }
+    } else {
+        if (!g_dyn_snr.need_trial) {
+            g_dyn_snr.need_trial = true;
+
+            snr_cfg = (g_dyn_snr.rx_info.snr_cfg[0] + 1) % SNR_MAX;
+            g_dyn_snr.rx_info.trial_cnt++;
+
+            } else {
+                if (g_dyn_snr.rx_info.trial_cnt == 2) { //try 2 times
+                    g_dyn_snr.need_trial = false;
+                    g_dyn_snr.rx_info.trial_cnt = 0;
+                    //compare
+                    for (i = 0; i < 3; i++) {
+                        if (g_dyn_snr.rx_info.rx_tp[i] > best_tp) {
+                            best_tp = g_dyn_snr.rx_info.rx_tp[i];
+                            snr_cfg = g_dyn_snr.rx_info.snr_cfg[i];
+                        }
+                    }
+
+                } else {
+
+                    if (g_dyn_snr.rx_info.snr_cfg[0] > 0) {
+                        snr_cfg = (g_dyn_snr.rx_info.snr_cfg[0] - 1);
+                    } else {
+                        snr_cfg = 3;
+                    }
+                    g_dyn_snr.rx_info.trial_cnt++;
+                }
+        }
+
         change_value &= ~(BIT(29) | BIT(30));
         change_value |= (snr_cfg << 29);
-        AML_REG_WRITE(change_value, priv->plat, AML_ADDR_SYSTEM, 0xc00828);
+        AML_REG_WRITE(change_value, priv->plat, 0, 0x60c00828);
     }
 
     spin_lock_bh(&priv->tx_lock);
@@ -3133,18 +3373,23 @@ end:
     return 0;
 }
 
+/**
+ * aml_rxdataind - Process rx buffer
+ *
+ * @pthis: Pointer to the object attached to the IPC structure
+ *         (points to struct aml_hw is this case)
+ * @arg: Address of the RX descriptor
+ *
+ * This function is called for each buffer received by the fw
+ *
+ */
 u8 aml_rxdataind(void *pthis, void *arg)
 {
     struct aml_hw *aml_hw = pthis;
     s8 ret;
 
     if (aml_bus_type != PCIE_MODE) {
-        u32 irq_consume = jiffies;
         ret = aml_sdio_usb_rxdataind(aml_hw);
-
-        if (jiffies_to_msecs(jiffies - irq_consume) > 20)
-            AML_PRINT(AML_DBG_MODULES_IRQ, "sdio consume %ld\n", jiffies_to_msecs(jiffies - irq_consume));
-
     } else {
         ret = aml_pci_rxdataind(aml_hw, arg);
     }
@@ -3247,7 +3492,7 @@ void aml_alloc_global_rx_rate(struct aml_hw *aml_hw, struct aml_wq *aml_wq)
 
     memset(&g_dyn_snr, 0, sizeof(struct aml_dyn_snr_cfg));
     g_dyn_snr.enable = 1;
-    g_dyn_snr.snr_mcs_ration = 60;
+    g_dyn_snr.snr_mcs_ration = 90;
     return;
 error_after_dir:
     if (sta->stats.rx_rate.table) {

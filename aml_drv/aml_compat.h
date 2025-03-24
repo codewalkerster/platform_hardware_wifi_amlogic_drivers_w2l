@@ -29,6 +29,13 @@
 #include <linux/upstream_version.h>
 #endif
 
+/* For some platform using backport like ROKU, might not use kernel's cfg80211 code */
+#ifdef CFG_CFG80211_VERSION
+#define CFG80211_VERSION_CODE CFG_CFG80211_VERSION
+#else
+#define CFG80211_VERSION_CODE LINUX_VERSION_CODE
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 0)
 #error "Minimum kernel version supported is 4.4"
 #endif
@@ -54,32 +61,32 @@
 #endif
 
 static inline void aml_cfg80211_ch_switch_notify(struct net_device *dev,
-	struct cfg80211_chan_def *chandef, unsigned int link_id)
+    struct cfg80211_chan_def *chandef, unsigned int link_id)
 {
-#if ( (defined (CONFIG_AMLOGIC_KERNEL_VERSION) && defined (AML_KERNEL_VERSION)) && (\
-		(CONFIG_AMLOGIC_KERNEL_VERSION == 13515 && AML_KERNEL_VERSION >= 15)\
-	 || (CONFIG_AMLOGIC_KERNEL_VERSION == 14515 && AML_KERNEL_VERSION >= 12) ) )\
-	 || (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0))
-	 return cfg80211_ch_switch_notify(dev, &chandef, link_id, 0);
+#if ((defined (CONFIG_AMLOGIC_KERNEL_VERSION) && defined (AML_KERNEL_VERSION)) && (\
+    (CONFIG_AMLOGIC_KERNEL_VERSION == 13515 && AML_KERNEL_VERSION >= 15)\
+    || (CONFIG_AMLOGIC_KERNEL_VERSION == 14515 && AML_KERNEL_VERSION >= 12) ) )\
+    || (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0))
+    return cfg80211_ch_switch_notify(dev, chandef, link_id, 0);
 #elif defined (CFG80211_SINGLE_NETDEV_MULTI_LINK_SUPPORT)
-	 return cfg80211_ch_switch_notify(dev, &chandef, link_id);
+    return cfg80211_ch_switch_notify(dev, chandef, link_id);
 #else
-	 return cfg80211_ch_switch_notify(dev, &chandef);
+    return cfg80211_ch_switch_notify(dev, chandef);
 #endif
 }
 
 static inline void aml_cfg80211_ch_switch_started_notify(struct net_device *dev,
-	struct cfg80211_chan_def *chandef, unsigned int link_id, u8 count, bool quiet)
+    struct cfg80211_chan_def *chandef, unsigned int link_id, u8 count, bool quiet)
 {
-#if ( (defined (CONFIG_AMLOGIC_KERNEL_VERSION) && defined (AML_KERNEL_VERSION)) && (\
-		(CONFIG_AMLOGIC_KERNEL_VERSION == 13515 && AML_KERNEL_VERSION >= 15)\
-	 || (CONFIG_AMLOGIC_KERNEL_VERSION == 14515 && AML_KERNEL_VERSION >= 12) ) )\
-	 || (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0))
-	 return cfg80211_ch_switch_started_notify(dev, &chandef, link_id, count, quiet, 0);
+#if ((defined (CONFIG_AMLOGIC_KERNEL_VERSION) && defined (AML_KERNEL_VERSION)) && (\
+    (CONFIG_AMLOGIC_KERNEL_VERSION == 13515 && AML_KERNEL_VERSION >= 15)\
+    || (CONFIG_AMLOGIC_KERNEL_VERSION == 14515 && AML_KERNEL_VERSION >= 12) ) )\
+    || (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0))
+    return cfg80211_ch_switch_started_notify(dev, chandef, link_id, count, quiet, 0);
 #elif defined (CFG80211_SINGLE_NETDEV_MULTI_LINK_SUPPORT)
-	 return cfg80211_ch_switch_started_notify(dev, &chandef, link_id, count, quiet);
+    return cfg80211_ch_switch_started_notify(dev, chandef, link_id, count, quiet);
 #else
-	 return cfg80211_ch_switch_started_notify(dev, &chandef, count);
+    return cfg80211_ch_switch_started_notify(dev, chandef, count);
 #endif
 }
 
@@ -167,11 +174,13 @@ static inline void aml_cfg80211_ch_switch_started_notify(struct net_device *dev,
 #define IEEE80211_HE_PHY_CAP9_NOMIMAL_PKT_PADDING_RESERVED      0xc0
 #define IEEE80211_HE_PHY_CAP9_NOMIMAL_PKT_PADDING_MASK          0xc0
 
+#if CFG80211_VERSION_CODE < KERNEL_VERSION(4, 19, 0)
 struct element {
 	u8 id;
 	u8 datalen;
 	u8 data[];
 } __packed;
+#endif
 
 #define for_each_element(_elem, _data, _datalen)			\
 	for (_elem = (const struct element *)(_data);			\
@@ -207,7 +216,7 @@ cfg80211_find_elem(u8 eid, const u8 *ies, int len)
 #define IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_MASK IEEE80211_HE_MAC_CAP3_MAX_A_AMPDU_LEN_EXP_MASK
 #endif // 4.20
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 19, 0)
+#if CFG80211_VERSION_CODE < KERNEL_VERSION(4, 19, 0)
 #define IEEE80211_RADIOTAP_HE 23
 #define IEEE80211_RADIOTAP_HE_MU 24
 
@@ -340,13 +349,13 @@ enum {
 #endif
 #endif // 4.19
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 17, 0)
+#if CFG80211_VERSION_CODE < KERNEL_VERSION(4, 17, 0)
 #define cfg80211_probe_status(ndev, addr, cookie, ack, ack_pwr, pwr_valid, gfp) \
     cfg80211_probe_status(ndev, addr, cookie, ack, gfp)
 #endif // 4.17
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
+#if CFG80211_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(4, 10, 0)
 #define aml_cfg80211_add_iface(wiphy, name, name_assign_type, type, params) \
     aml_cfg80211_add_iface(wiphy, name, name_assign_type, type, u32 *flags, params)
 
@@ -361,6 +370,7 @@ enum {
 #define CCFS1(vht) vht->center_freq_seg2_idx
 
 
+#if CFG80211_VERSION_CODE < KERNEL_VERSION(4, 19, 0)
 struct cfg80211_roam_info {
 	struct ieee80211_channel *channel;
 	struct cfg80211_bss *bss;
@@ -374,7 +384,7 @@ struct cfg80211_roam_info {
 #define cfg80211_roamed(_dev, _info, _gfp) \
     cfg80211_roamed(_dev, (_info)->channel, (_info)->bssid, (_info)->req_ie, \
                     (_info)->req_ie_len, (_info)->resp_ie, (_info)->resp_ie_len, _gfp)
-
+#endif
 #else // 4.12
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)
@@ -385,7 +395,7 @@ struct cfg80211_roam_info {
 #define CCFS1(vht) vht->center_freq_seg1_idx
 #endif // 4.12
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
+#if CFG80211_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
 #define cfg80211_cqm_rssi_notify(dev, event, level, gfp) \
     cfg80211_cqm_rssi_notify(dev, event, gfp)
 #endif // 4.11
@@ -686,4 +696,7 @@ static inline ssize_t FILE_WRITE(struct file *file, const void *buf, size_t coun
 #endif
 }
 
+#ifdef MODULE_IMPORT_NS
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#endif
 #endif /* _AML_COMPAT_H_ */

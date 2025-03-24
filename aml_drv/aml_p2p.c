@@ -10,6 +10,8 @@
  ******************************************************************************
  */
 
+#define AML_MODULE          P2P
+
 #include "aml_msg_tx.h"
 #include "aml_mod_params.h"
 #include "reg_access.h"
@@ -87,7 +89,7 @@ u16 aml_scc_p2p_rewrite_chan_list(u8* buf, u32 offset, u8 target_chan_no, enum n
     u8 chan_list_idx = 0;
 
     chan_list_ie_len = buf[offset + 1] | (buf[offset + 2] << 8);
-    AML_PRINT(AML_DBG_MODULES_P2P, "[P2P SCC] target_chan_no:%d", target_chan_no);
+    AML_INFO("[P2P SCC] target_chan_no:%d", target_chan_no);
     while (idx < chan_list_ie_len) {
         enum nl80211_band band_parse;
 
@@ -101,7 +103,7 @@ u16 aml_scc_p2p_rewrite_chan_list(u8* buf, u32 offset, u8 target_chan_no, enum n
                         chan_list_buf[chan_list_idx++] = oper_class;
                         chan_list_buf[chan_list_idx++] = 1;
                         chan_list_buf[chan_list_idx++] = target_chan_no;
-                        AML_PRINT(AML_DBG_MODULES_P2P, "[P2P SCC] chan match, chan_no:%d class:%d", chan_no_check, oper_class);
+                        AML_WARN("[P2P SCC] chan match, chan_no:%d class:%d", chan_no_check, oper_class);
                         break;
                     }
                 }
@@ -118,7 +120,7 @@ u16 aml_scc_p2p_rewrite_chan_list(u8* buf, u32 offset, u8 target_chan_no, enum n
                             chan_list_buf[chan_list_idx++] = oper_class;
                             chan_list_buf[chan_list_idx++] = 1;
                             chan_list_buf[chan_list_idx++] = target_chan_no;
-                            AML_PRINT(AML_DBG_MODULES_P2P, "[P2P SCC] chan match, chan_no:%d class:%d", chan_no_check, oper_class);
+                            AML_WARN("[P2P SCC] chan match, chan_no:%d class:%d", chan_no_check, oper_class);
                             break;
                         }
                     }
@@ -132,7 +134,7 @@ u16 aml_scc_p2p_rewrite_chan_list(u8* buf, u32 offset, u8 target_chan_no, enum n
                     chan_list_buf[chan_list_idx++] = oper_class;
                     chan_list_buf[chan_list_idx++] = 1;
                     chan_list_buf[chan_list_idx++] = target_chan_no;
-                    AML_PRINT(AML_DBG_MODULES_P2P, "[P2P SCC] chan match, chan_no:%d class:%d", chan_no_check, oper_class);
+                    AML_WARN("[P2P SCC] chan match, chan_no:%d class:%d", chan_no_check, oper_class);
                     break;
                 }
             }
@@ -249,7 +251,7 @@ void aml_change_p2p_operchan(struct aml_vif *vif, u8 *buf, u32 frame_len, struct
                 bool replace = aml_scc_compare_oper_class(buf[offset + 6],oper_class_new);
                 AML_INFO("[P2P SCC] operating chan  %d ->  %d,oper_class:[%d %d]",  buf[offset + 7], chan_no, buf[offset + 6], oper_class_new);
                 if (replace) {
-                    AML_PRINT(AML_DBG_MODULES_P2P, "[P2P SCC] operating class  %d ->  %d",  buf[offset + 6], oper_class_new);
+                    AML_INFO("[P2P SCC] operating class  %d ->  %d",  buf[offset + 6], oper_class_new);
                     buf[offset + 6] = oper_class_new;
                 }
                 buf[offset + 7] = chan_no;

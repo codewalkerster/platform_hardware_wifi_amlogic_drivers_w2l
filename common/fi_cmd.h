@@ -174,6 +174,30 @@ typedef struct Cali_Param
     W2_EFUSE_PARAM w2_efuse_param;
 } Cali_Param;
 
+typedef struct COUNTRY_PWR_LIMIT_CFG
+{
+    unsigned char version;
+    unsigned char country_pwr_limit_en;
+
+    unsigned char wf2g_11b_limit[4];
+    unsigned char wf2g_11g_limit[8];
+    unsigned char wf2g_ht20_limit[8];
+    unsigned char wf2g_ht40_limit[8];
+    unsigned char wf2g_vht20_limit[9];
+    unsigned char wf2g_vht40_limit[10];
+    unsigned char wf2g_he20_limit[12];
+    unsigned char wf2g_he40_limit[12];
+
+    unsigned char wf5g_11a_limit[8];
+    unsigned char wf5g_ht20_limit[8];
+    unsigned char wf5g_ht40_limit[8];
+    unsigned char wf5g_vht20_limit[9];
+    unsigned char wf5g_vht40_limit[10];
+    unsigned char wf5g_vht80_limit[10];
+    unsigned char wf5g_he20_limit[12];
+    unsigned char wf5g_he40_limit[12];
+    unsigned char wf5g_he80_limit[12];
+} COUNTRY_PWR_LIMIT_CFG;
 
 //================cmd=========================================
 

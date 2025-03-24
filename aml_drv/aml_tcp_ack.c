@@ -10,6 +10,8 @@
 ****************************************************************************************
 */
 
+#define AML_MODULE      TCP
+
 #include <linux/if_ether.h>
 #include <linux/tcp.h>
 #include <linux/ip.h>
@@ -183,7 +185,7 @@ static void aml_send_tcp_ack(struct aml_tcp_ack_tx *tx_info)
 
     }
     if (aml_bus_type != PCIE_MODE) {
-        AML_PRINT(AML_DBG_MODULES_TX, "ethertype:0x%04x, credits:%d, tid:%d, vif_idx:%d\n",
+        AML_RLMT_INFO("ethertype:0x%04x, credits:%d, tid:%d, vif_idx:%d\n",
                   cpu_to_be16(desc->host.ethertype), txq->credits, desc->host.tid, desc->host.vif_idx);
     }
 
@@ -191,7 +193,7 @@ static void aml_send_tcp_ack(struct aml_tcp_ack_tx *tx_info)
     spin_lock_bh(&aml_hw->tx_lock);
 
     if (txq->idx == TXQ_INACTIVE) {
-        printk("%s:%d Get txq idx is inactive after spin_lock_bh	\n", __func__, __LINE__);
+        AML_RLMT_ERR("Get txq idx is inactive after spin_lock_bh	\n");
         //"do not push and process it with kernel list lib it whill be re-pull out and used this freed buf"
         spin_unlock_bh(&aml_hw->tx_lock);
         goto free;
@@ -199,7 +201,7 @@ static void aml_send_tcp_ack(struct aml_tcp_ack_tx *tx_info)
 
     if (aml_txq_queue_skb(skb, txq, aml_hw, false, NULL)) {
         if (skb_queue_empty(&txq->sk_list))
-            AML_INFO("txq queue skb list empty");
+            AML_ERR("txq queue skb list empty");
         aml_hwq_process(aml_hw, txq->hwq);
     }
     spin_unlock_bh(&aml_hw->tx_lock);
@@ -609,18 +611,31 @@ int aml_replace_tcp_ack(struct sk_buff *skb,
     return ret;
 }
 
+/* return zero if no change */
 int aml_set_tcp_ack_accord_to_rssi(struct aml_sta *sta, struct aml_hw *aml_hw, s32_l rssi)
 {
     struct aml_tcp_sess_mgr *ack_mgr = &aml_hw->ack_mgr;
-    if (aml_bus_type == USB_MODE && sta->band == NL80211_BAND_2GHZ) {
-        if (rssi < ack_mgr->rssi_l_thr && atomic_read(&ack_mgr->enable)) {
-            atomic_set(&ack_mgr->enable, 0);
-            printk("%s, %d set enable 0\n", __func__, __LINE__);
-        } else if (rssi > ack_mgr->rssi_h_thr && !atomic_read(&ack_mgr->enable)) {
-            atomic_set(&ack_mgr->enable, 1);
-            printk("%s, %d set enable 1\n", __func__, __LINE__);
-        }
-    }
+    bool enable = false;
+
+    if (aml_bus_type != USB_MODE)   /* only effect on USB device */
+        return 0;
+
+    if (aml_work_on_5g_band(aml_hw))
+        enable = true;  /* force to enable it if work on 5GHz band */
+    else if (rssi > ack_mgr->rssi_h_thr)
+        enable = true;  /* enable it if rssi is good enough */
+    else if (rssi >= ack_mgr->rssi_l_thr)
+        return 0;       /* no change if rssi in range[rssi_l_thr, rssi_h_thr] */
+    else
+        enable = false; /* rssi is worse, disable it */
+
+    if (enable == !!atomic_read(&ack_mgr->enable))
+        return 0;
+
+    atomic_set(&ack_mgr->enable, enable);
+    /* printk("%s, set enable %d\n", __func__, enable); */
+
+    return 1;
 }
 
 int aml_filter_tx_tcp_ack(struct net_device *dev,

@@ -31,7 +31,8 @@ CONFIG_AML_RX_SG ?= n
 
 # extra DEBUG config
 CONFIG_AML_SW_PROFILING ?= n
-CONFIG_AML_DBG ?= n
+CONFIG_AML_PRODUCT ?= W2L
+CONFIG_AML_LOG_BUILD_LEVEL ?= LOGLEVEL_DEBUG
 
 #Enable LA (for non-PCIE platform only)
 #should make PROJ=SDIO VER=LA for firmware also
@@ -43,9 +44,28 @@ CONFIG_AML_USB_LARGE_PAGE ?= y
 #nan support
 CONFIG_AML_NAN_SUPPORT ?= n
 
+#
+# For PCIE:
+#  * firmware reorder is the only way.
+#
+# For SDIO/USB:
+#  * host reorder is mandatory.
+#  * firmware reorder is for internal test.
+#  If driver is built with CONFIG_AML_SDIO_USB_FW_REORDER=y, then it supports both of them.
+#  that's to say, the driver follows firmware's setting.
+#
+#  PS: To enable firmware reorder, build SDIO/USB firmware with FW_REORDER=y
+#      (e.g. make PROJ=SDIO FW_REORDER=y),
+#      by default, SDIO/USB firmware supports host reorder. (e.g. make PROJ=USB)
+#
+# FIXME: remove CONFIG_AML_SDIO_USB_FW_REORDER and related code in the future
+#
+CONFIG_AML_SDIO_USB_FW_REORDER ?= y
+
 obj-m := w2l.o
 w2l-y := ../aml_msg_tx.o        \
         ../aml_msg_rx.o        \
+        ../aml_reorder.o       \
         ../aml_utils.o         \
         ../aml_cmds.o          \
         ../aml_irqs.o          \
@@ -74,18 +94,23 @@ w2l-y := ../aml_msg_tx.o        \
         ../aml_task.o          \
         ../aml_rps.o           \
         ../aml_sap.o           \
-        ../aml_mdns_offload.o
+        ../aml_csi.o           \
+        ../aml_mdns_offload.o  \
+        ../aml_roku_custom.o
 
 obj-m += w2l_comm.o
 w2l_comm-objs := \
         ../aml_bus/aml_interface.o \
         ../aml_bus/usb_common.o    \
-        ../aml_bus/sdio_common.o   \
         ../aml_bus/aml_w2_pci.o    \
         ../aml_bus/aml_w2_v7.o     \
-        ../aml_bus/w2_sdio.o       \
         ../aml_bus/aml_static_buf.o \
+        ../aml_bus/aml_bt_notify.o \
         ../aml_bus/w2_usb.o
+ifeq ($(SDIO_MODE_ON), y)
+w2l_comm-objs += ../aml_bus/sdio_common.o
+w2l_comm-objs += ../aml_bus/w2_sdio.o
+endif
 
 w2l-$(CONFIG_AML_RADAR)        += ../aml_radar.o
 w2l-$(CONFIG_DEBUG_FS)         += ../aml_debugfs.o
@@ -97,6 +122,7 @@ w2l-$(CONFIG_AML_MUMIMO_TX)    += ../aml_mu_group.o
 w2l-$(CONFIG_AML_NAN_SUPPORT)  += ../aml_sha256_internal.o
 w2l-$(CONFIG_AML_NAN_SUPPORT)  += ../aml_nan.o
 
+
 ccflags-y := -DCONFIG_AML_FULLMAC
 ifneq ($(CUR_DIR),)
 src :=$(CUR_DIR)/fullmac
@@ -105,6 +131,9 @@ ccflags-y += -I$(src)
 ccflags-y += -I$(src)/..
 ccflags-y += -I$(src)/../aml_bus
 ccflags-y += -I$(src)/../../common
+ifneq ($(CONFIG_AML_PRODUCT),)
+ccflags-y += -DCONFIG_AML_LOG_PREFIX=\"[$(CONFIG_AML_PRODUCT)]\"
+endif
 ccflags-$(CONFIG_AML_RADAR) += -DCONFIG_AML_RADAR
 ccflags-$(CONFIG_AML_MON_DATA) += -DCONFIG_AML_MON_DATA
 ccflags-$(CONFIG_AML_BFMER) += -DCONFIG_AML_BFMER
@@ -113,13 +142,14 @@ ifeq ($(CONFIG_AML_SPLIT_TX_BUF), y)
 ccflags-$(CONFIG_AML_AMSDUS_TX) += -DCONFIG_AML_AMSDUS_TX
 endif
 ccflags-$(CONFIG_AML_RX_SG) += -DCONFIG_AML_RX_SG
-ccflags-$(CONFIG_AML_DBG) += -DCONFIG_AML_DBG
+ccflags-$(CONFIG_AML_LOG_BUILD_LEVEL) += -DCONFIG_AML_LOG_BUILD_LEVEL=$(CONFIG_AML_LOG_BUILD_LEVEL)
 ccflags-$(CONFIG_AML_SW_PROFILING) += -DCONFIG_AML_SW_PROFILING
 ccflags-$(CONFIG_AML_MUMIMO_TX) += -DCONFIG_AML_MUMIMO_TX
 ccflags-$(CONFIG_AML_SUSPEND) += -DCONFIG_AML_SUSPEND
 ccflags-$(CONFIG_AML_LA) += -DCONFIG_AML_LA
 ccflags-$(CONFIG_AML_USB_LARGE_PAGE) += -DCONFIG_AML_USB_LARGE_PAGE
 ccflags-$(CONFIG_AML_NAN_SUPPORT) += -DCONFIG_AML_NAN_SUPPORT
+ccflags-$(CONFIG_AML_SDIO_USB_FW_REORDER) += -DCONFIG_AML_SDIO_USB_FW_REORDER
 
 ifeq ($(CONFIG_AML_MUMIMO_TX), y)
 ccflags-y += -DCONFIG_USER_MAX=2
@@ -167,13 +197,11 @@ quiet_cmd_genvers = GENVERSION $@
       cmd_genvers = ($(build_dir)/mkvers.sh $(build_dir)/aml_version_gen.h $@)
 
 $(obj)/aml_main.o: $(obj)/aml_version_gen.h
-
 # To avoid always regenerating aml_version_gen.h (i.e. depend on FORCE), add
 # dependency on all object (which already include dependency on headers files).
 # Still Cannot add dependency on aml_main.o otherwise this will create circular
 # dependency, so instead add dependency only on aml_main.c. This will fail to
 # regenerate aml_version_gen.h if dependency of only aml_main.c is changed.
-# This is OK as, currently, the only such dependency is aml_version.h
 $(obj)/aml_version_gen.h: $(addprefix $(obj)/,$(filter-out aml_main.o, $(aml_fdrv-y))) $(src)/aml_main.c
 	$(call cmd,genvers)
 

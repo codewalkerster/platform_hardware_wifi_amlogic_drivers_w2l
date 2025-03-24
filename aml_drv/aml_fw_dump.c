@@ -482,7 +482,7 @@ int aml_um_helper(struct aml_debugfs *aml_debugfs, const char *cmd)
 
     if ((ret = CALL_USERMODEHELPER(argv[0], argv, envp,
                                    UMH_WAIT_PROC | UMH_KILLABLE)))
-        dev_err(aml_hw->dev, "Failed to call %s (%s returned %d)\n",
+        dev_err(aml_hw->dev, "Failed to call %s (%s returned 0x%x)\n",
                 argv[0], cmd, ret);
     argv_free(argv);
 

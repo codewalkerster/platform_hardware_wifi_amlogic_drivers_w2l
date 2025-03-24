@@ -19,6 +19,7 @@
 #define LMAC_MAC_H_
 
 #include "lmac_types.h"
+#include "aml_compat.h"
 
 /// Interface types
 enum mac_vif_type
@@ -483,6 +484,11 @@ struct mac_ftm_results
         /// Round Trip Time (in ps)
         u32_l rtt;
     } meas[FTM_RSP_MAX];
+};
+
+struct hecapa_from_assocreq {
+    struct mac_hecapability he_cap;
+    u8 addr[MAC_ADDR_LEN];
 };
 
 #endif // LMAC_MAC_H_

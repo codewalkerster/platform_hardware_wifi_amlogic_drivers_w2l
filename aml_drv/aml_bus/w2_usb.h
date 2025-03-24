@@ -1,6 +1,19 @@
 #ifndef _W2_USB_H_
 #define _W2_USB_H_
+
 #include "usb_common.h"
+
+/* memory mapping for wifi space */
+#define MAC_ICCM_AHB_BASE    0x00000000
+#define MAC_REG_BASE         0x00a00000
+#define MAC_DCCM_AHB_BASE    0x00d00000
+
+#define WIFI_TOP (0xa07000)
+#define RG_WIFI_RST_CTRL (WIFI_TOP + 0x00)
+
+#define WIFI_READ_CMD   0
+#define BT_READ_CMD     1
+#define WRITE_SRAM_DATA_LEN 477
 
 #define BT_INTR_TRANS_FLAG 0xc6a780c2
 
@@ -21,7 +34,7 @@
 
 /*auc--amlogic usb common*/
 struct auc_hif_ops {
-    int (*hi_send_cmd)(unsigned int addr, unsigned int len);//just for bt not modify code
+    int (*hi_read_tx_cfm)(unsigned char* buf, unsigned int len, unsigned int *actual_length);
 
     void (*hi_write_word)(unsigned int addr,unsigned int data, unsigned int ep);
     unsigned int (*hi_read_word)(unsigned int addr, unsigned int ep);
@@ -48,4 +61,9 @@ struct auc_hif_ops {
 
 int wifi_fw_download(char *firmware_filename);
 int start_wifi(void);
+int aml_usb_download_suspend_or_rf_fw(unsigned char fw_type);
+unsigned int auc_read_word_by_ep_for_bt(unsigned int addr, unsigned int ep);
+void auc_write_word_by_ep_for_wifi(unsigned int addr,unsigned int data, unsigned int ep);
+unsigned int auc_read_word_by_ep_for_wifi(unsigned int addr, unsigned int ep);
+
 #endif

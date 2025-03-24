@@ -152,7 +152,7 @@ static inline char *__mdnsOffload_decode_qname(unsigned char *buf,
         goto err;
     qname = (char *)kmalloc(256, GFP_KERNEL);
     if (!qname) {
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: alloc failed!\n");
+        AML_ERR("mdnsOffload: alloc failed!\n");
         return NULL;
     }
     memset(qname, 0, 256);
@@ -180,7 +180,7 @@ static inline char *__mdnsOffload_decode_qname(unsigned char *buf,
     }
     return qname;
 err:
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: decode qname failed!\n");
+    AML_ERR("mdnsOffload: decode qname failed!\n");
     kfree(qname);
     return NULL;
 }
@@ -194,7 +194,7 @@ static inline void __mdnsOffload_dump_msg(unsigned char *buf,
 
     dump = (unsigned char *)kmalloc(256, GFP_KERNEL);
     if (!dump) {
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: alloc failed!\n");
+        AML_ERR("mdnsOffload: alloc failed!\n");
         return;
     }
     for (i = 0; i < len; i++) {
@@ -217,8 +217,7 @@ static inline void __mdnsOffload_dump_msg(unsigned char *buf,
             else
                 n += sprintf(dump + n, ".");
         }
-        AML_PRINT(AML_DBG_MODULES_MDNS, "%s\n", dump);
-        //printk("%s\n", dump);
+        AML_WARN("%s\n", dump);
         i = i + line - 1;
     }
     kfree(dump);
@@ -234,7 +233,7 @@ static inline int __mdnsOffload_send_vendor_cmd_reply(struct wiphy *wiphy,
 
     skb = cfg80211_vendor_cmd_alloc_reply_skb(wiphy, len);
     if (unlikely(!skb)) {
-        AML_PRINT(AML_DBG_MODULES_MDNS, "skb alloc failed!\n");
+        AML_ERR("skb alloc failed!\n");
         err = -ENOMEM;
         goto exit;
     }
@@ -243,7 +242,7 @@ static inline int __mdnsOffload_send_vendor_cmd_reply(struct wiphy *wiphy,
     nla_put(skb, NL80211_ATTR_VENDOR_DATA, len, data);
     err = cfg80211_vendor_cmd_reply(skb);
     if (err)
-        AML_PRINT(AML_DBG_MODULES_MDNS, "cfg80211_vendor_cmd_reply failed!ret=%d\n", err);
+        AML_ERR("cfg80211_vendor_cmd_reply failed!ret=%d\n", err);
 exit:
     return err;
 }
@@ -268,7 +267,7 @@ static inline int __mdnsOffload_setOffloadState(struct wiphy *wiphy,
                 p_enabled = &enabled;
                 break;
             default:
-                AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: unknown type:%d\n", type);
+                AML_ERR("mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
@@ -290,7 +289,7 @@ static inline int __mdnsOffload_setOffloadState(struct wiphy *wiphy,
     }
 exit:
     if (err)
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: setOffloadState: failed!err:%d\n", err);
+        AML_ERR("mdnsOffload: setOffloadState: failed!err:%d\n", err);
     return err;
 }
 
@@ -301,7 +300,7 @@ static inline int __mdnsOffload_resetAll(struct wiphy *wiphy,
     struct aml_vif *vif = netdev_priv(wdev->netdev);
     int err = 0;
 
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: resetAll\n");
+    AML_WARN("mdnsOffload: resetAll\n");
     if (mdns_offload_ops.resetAll)
         mdns_offload_ops.resetAll(aml_hw);
     else {
@@ -311,7 +310,7 @@ static inline int __mdnsOffload_resetAll(struct wiphy *wiphy,
     }
 exit:
     if (err)
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: resetAll: failed!err=%d\n", err);
+        AML_ERR("mdnsOffload: resetAll: failed!err=%d\n", err);
     return err;
 }
 
@@ -350,7 +349,7 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
                 if (pkt_len > 0) {
                     pkt_data = (unsigned char *)kmalloc(pkt_len, GFP_KERNEL);
                     if (!pkt_data) {
-                        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: alloc failed!\n");
+                        AML_ERR("mdnsOffload: alloc failed!\n");
                         err = -ENOMEM;
                         goto exit;
                     }
@@ -367,7 +366,7 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
                     size = criteriaListNum * sizeof(matchCriteria);
                     criteriaList = (matchCriteria *)kmalloc(size, GFP_KERNEL);
                     if (!criteriaList) {
-                        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: alloc failed!\n");
+                        AML_ERR("mdnsOffload: alloc failed!\n");
                         err = -ENOMEM;
                         goto exit;
                     }
@@ -376,7 +375,7 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
                 }
                 break;
             default:
-                AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: unknown type:%d\n", type);
+                AML_ERR("mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
@@ -386,29 +385,27 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
         goto exit;
     }
 
-    AML_INFO("mdnsOffload: addProtocolResponses: ifname:%s\n", ifname);
     AML_INFO("mdnsOffload: addProtocolResponses: pkt_len:%u\n", pkt_len);
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: addProtocolResponses: criteriaListNum:%u\n",
+    AML_INFO("mdnsOffload: addProtocolResponses: criteriaListNum:%u\n",
         criteriaListNum);
     for (i = 0; i < criteriaListNum; i++) {
         qname = __mdnsOffload_decode_qname(pkt_data, pkt_len,
             criteriaList[i].nameOffset);
-        AML_PRINT(AML_DBG_MODULES_MDNS, "%d. type:%d\tnameOffset:%d\tname:%s\n", i + 1,
+        AML_INFO("%d. type:%d\tnameOffset:%d\tname:%s\n", i + 1,
             criteriaList[i].type,
             criteriaList[i].nameOffset,
             (qname && strlen(qname) > 0) ? qname : "none");
         kfree(qname);
         qname = NULL;
     }
-    AML_PRINT(AML_DBG_MODULES_MDNS, "rawOffloadPacket:\n");
-    __mdnsOffload_dump_msg(pkt_data, pkt_len);
+    //__mdnsOffload_dump_msg(pkt_data, pkt_len);
     if (mdns_offload_ops.addProtocolResponses) {
         offloadData.rawOffloadPacketLen = pkt_len;
         offloadData.rawOffloadPacket = pkt_data;
         offloadData.matchCriteriaListNum = criteriaListNum;
         offloadData.matchCriteriaList = criteriaList;
         reply = mdns_offload_ops.addProtocolResponses(aml_hw, ifname, &offloadData);
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: addProtocolResponses: reply:%d\n", reply);
+        AML_INFO("mdnsOffload: addProtocolResponses: reply:%d\n", reply);
         err = __mdnsOffload_send_vendor_cmd_reply(wiphy,
             WIFI_MDNS_OFFLOAD_ADD_PROTOCOL_RESPONSES,
             &reply, sizeof(reply));
@@ -418,13 +415,13 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
         goto exit;
     }
 exit:
-    if (!pkt_data)
+    if (pkt_data)
         kfree(pkt_data);
-    if (!criteriaList)
+    if (criteriaList)
         kfree(criteriaList);
 
     if (err)
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: addProtocolResponses: failed!err:%d\n", err);
+        AML_ERR("mdnsOffload: addProtocolResponses: failed!err:%d\n", err);
     return err;
 }
 
@@ -448,7 +445,7 @@ static inline int __mdnsOffload_removeProtocolResponses(struct wiphy *wiphy,
                 p_recordKey = &recordKey;
                 break;
             default:
-                AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: unknown type:%d\n", type);
+                AML_ERR("mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
@@ -456,7 +453,7 @@ static inline int __mdnsOffload_removeProtocolResponses(struct wiphy *wiphy,
         err = -EINVAL;
         goto exit;
     }
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: removeProtocolResponses: recordKey:%d\n",
+    AML_INFO("mdnsOffload: removeProtocolResponses: recordKey:%d\n",
         recordKey);
     if (mdns_offload_ops.removeProtocolResponses) {
         mdns_offload_ops.removeProtocolResponses(aml_hw, recordKey);
@@ -467,7 +464,7 @@ static inline int __mdnsOffload_removeProtocolResponses(struct wiphy *wiphy,
     }
 exit:
     if (err)
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: removeProtocolResponses: failed!err:%d\n", err);
+        AML_ERR("mdnsOffload: removeProtocolResponses: failed!err:%d\n", err);
     return err;
 }
 
@@ -482,7 +479,6 @@ static inline int __mdnsOffload_getAndResetHitCounter(struct wiphy *wiphy,
     int *p_recordKey = NULL;
     int reply = 0;
 
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: getAndResetHitCounter\n");
     nla_for_each_attr(iter, data, len, rem) {
         type = nla_type(iter);
         //printk("mdnsOffload: attr type:%d\n", type);
@@ -492,7 +488,7 @@ static inline int __mdnsOffload_getAndResetHitCounter(struct wiphy *wiphy,
                 p_recordKey = &recordKey;
                 break;
             default:
-                AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: unknown type:%d\n", type);
+                AML_ERR("mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
@@ -500,7 +496,7 @@ static inline int __mdnsOffload_getAndResetHitCounter(struct wiphy *wiphy,
         err = -EINVAL;
         goto exit;
     }
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: getAndResetHitCounter: recordKey:%d\n",
+    AML_INFO("mdnsOffload: getAndResetHitCounter: recordKey:%d\n",
         recordKey);
     if (mdns_offload_ops.getAndResetHitCounter) {
         reply = mdns_offload_ops.getAndResetHitCounter(aml_hw, recordKey);
@@ -509,13 +505,13 @@ static inline int __mdnsOffload_getAndResetHitCounter(struct wiphy *wiphy,
             WIFI_MDNS_OFFLOAD_GET_AND_RESET_HIT_COUNTER,
             &reply, sizeof(reply));
     } else {
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: getAndResetHitCounter: unsupported!\n");
+        AML_INFO("mdnsOffload: getAndResetHitCounter: unsupported!\n");
         err = -EPERM;
         goto exit;
     }
 exit:
     if (err)
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: getAndResetHitCounter: failed!err:%d\n", err);
+        AML_ERR("mdnsOffload: getAndResetHitCounter: failed!err:%d\n", err);
     return err;
 }
 
@@ -527,10 +523,9 @@ static inline int __mdnsOffload_getAndResetMissCounter(struct wiphy *wiphy,
     int err = 0;
     int reply = 0;
 
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: getAndResetMissCounter\n");
     if (mdns_offload_ops.getAndResetMissCounter) {
         reply = mdns_offload_ops.getAndResetMissCounter(aml_hw);
-        //AML_INFO("mdnsOffload: getAndResetMissCounter: reply:%d\n", reply);
+        AML_INFO("mdnsOffload: getAndResetMissCounter: reply:%d\n", reply);
         err = __mdnsOffload_send_vendor_cmd_reply(wiphy,
             WIFI_MDNS_OFFLOAD_GET_AND_RESET_MISS_COUNTER,
             &reply, sizeof(reply));
@@ -541,7 +536,7 @@ static inline int __mdnsOffload_getAndResetMissCounter(struct wiphy *wiphy,
     }
 exit:
     if (err)
-         AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: getAndResetMissCounter: failed!err:%d\n", err);
+         AML_ERR("mdnsOffload: getAndResetMissCounter: failed!err:%d\n", err);
     return err;
 }
 
@@ -573,7 +568,7 @@ static inline int __mdnsOffload_addToPassthroughList(struct wiphy *wiphy,
                 p_qname = qname;
                 break;
             default:
-                AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: unknown type:%d\n", type);
+                AML_ERR("mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
@@ -581,7 +576,6 @@ static inline int __mdnsOffload_addToPassthroughList(struct wiphy *wiphy,
         err = -EINVAL;
         goto exit;
     }
-    AML_INFO("mdnsOffload: addToPassthroughList: ifname:%s\n", ifname);
     AML_INFO("mdnsOffload: addToPassthroughList: length:%d qname:%s\n", strlen(qname), qname);
     if (mdns_offload_ops.addToPassthroughList) {
         reply = mdns_offload_ops.addToPassthroughList(aml_hw, ifname, qname);
@@ -596,7 +590,7 @@ static inline int __mdnsOffload_addToPassthroughList(struct wiphy *wiphy,
     }
 exit:
     if (err)
-         AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: addToPassthroughList: failed!err:%d\n", err);
+         AML_ERR("mdnsOffload: addToPassthroughList: failed!err:%d\n", err);
     return err;
 }
 
@@ -612,7 +606,7 @@ static inline int __mdnsOffload_removeFromPassthroughList(struct wiphy *wiphy,
     char qname[64];
     char *p_qname = NULL;
 
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: removeFromPassthroughList\n");
+    AML_WARN("mdnsOffload: removeFromPassthroughList\n");
     memset(ifname, 0, sizeof(ifname));
     memset(qname, 0, sizeof(qname));
     nla_for_each_attr(iter, data, len, rem) {
@@ -628,12 +622,12 @@ static inline int __mdnsOffload_removeFromPassthroughList(struct wiphy *wiphy,
                 p_qname = qname;
                 break;
             default:
-                AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: unknown type:%d\n", type);
+                AML_ERR("mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: removeFromPassthroughList: ifname:%s\n", ifname);
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: removeFromPassthroughList: qname:%s\n", qname);
+
+    AML_WARN("mdnsOffload: removeFromPassthroughList: qname:%s\n", qname);
     if (!p_ifname || !p_qname) {
         err = -EINVAL;
         goto exit;
@@ -647,7 +641,7 @@ static inline int __mdnsOffload_removeFromPassthroughList(struct wiphy *wiphy,
     }
 exit:
     if (err)
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: removeFromPassthroughList: failed!err:%d\n", err);
+        AML_ERR("mdnsOffload: removeFromPassthroughList: failed!err:%d\n", err);
     return err;
 }
 
@@ -677,11 +671,11 @@ static inline int __mdnsOffload_setPassthroughBehavior(struct wiphy *wiphy,
                 p_behavior = &behavior;
                 break;
             default:
-                AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: unknown type:%d\n", type);
+                AML_ERR("mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
-    AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: setPassthroughBehavior: ifname:%s\n", ifname);
+    AML_INFO("mdnsOffload: setPassthroughBehavior: ifname:%s\n", ifname);
     AML_INFO("mdnsOffload: setPassthroughBehavior: behavior:%d\n", behavior);
     if (!p_ifname || !p_behavior) {
         err = -EINVAL;
@@ -697,7 +691,7 @@ static inline int __mdnsOffload_setPassthroughBehavior(struct wiphy *wiphy,
     }
 exit:
     if (err)
-        AML_PRINT(AML_DBG_MODULES_MDNS, "mdnsOffload: setPassthroughBehavior: failed!err:%d\n", err);
+        AML_ERR("mdnsOffload: setPassthroughBehavior: failed!err:%d\n", err);
     return err;
 }
 

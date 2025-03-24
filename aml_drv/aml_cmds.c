@@ -11,6 +11,8 @@
  ******************************************************************************
  */
 
+#define AML_MODULE                  CMD
+
 #include <linux/list.h>
 #include "aml_cmds.h"
 #include "aml_defs.h"
@@ -18,7 +20,8 @@
 #define CREATE_TRACE_POINTS
 #include "aml_events.h"
 #include "aml_interface.h"
-
+#include "aml_recy.h"
+#include "aml_msg_rx.h"
 
 extern unsigned int aml_bus_type;
 extern char *bus_type;
@@ -29,17 +32,16 @@ extern char *bus_type;
 static void cmd_dump(const struct aml_cmd *cmd)
 {
 #ifndef CONFIG_AML_FHOST
-    pr_err("tkn[%d]  flags:%04x  result:%3d  cmd:%4d-%-24s - reqcfm(%4d-%-s)\n",
-           cmd->tkn, cmd->flags, cmd->result, cmd->id, AML_ID2STR(cmd->id),
-           cmd->reqid, ((cmd->flags & AML_CMD_FLAG_REQ_CFM) &&
-               (cmd->reqid != (lmac_msg_id_t)-1)) ? AML_ID2STR(cmd->reqid) : "none");
+    pr_err("cmd tkn[%d]  flags:%04x  result:%3d  cmd:%4d-%-24s - reqcfm(%4d-%-s)\n", \
+               cmd->tkn, cmd->flags, cmd->result, cmd->id, cmd->id == MM_OTHER_REQ ? AML_MM_OTHER_CMD2STR(cmd) : AML_ID2STR(cmd->id), \
+               cmd->reqid, (((cmd->flags & AML_CMD_FLAG_REQ_CFM) && \
+               (cmd->reqid != (lmac_msg_id_t)-1)) ? AML_ID2STR(cmd->reqid) : "none"));
 #endif
 }
 
 #define CMD_PRINT(cmd) do { \
     if (cmd->id != ME_TRAFFIC_IND_REQ) { \
-        AML_PRINT(AML_DBG_MODULES_CMD, "[%-20.20s %4d] cmd tkn[%d]  flags:%04x  result:%3d  cmd:%4d-%-24s - reqcfm(%4d-%-s)\n", \
-               __func__, __LINE__,  \
+        AML_INFO("cmd tkn[%d]  flags:%04x  result:%3d  cmd:%4d-%-24s - reqcfm(%4d-%-s)\n", \
                cmd->tkn, cmd->flags, cmd->result, cmd->id, cmd->id == MM_OTHER_REQ ? AML_MM_OTHER_CMD2STR(cmd) : AML_ID2STR(cmd->id), \
                cmd->reqid, (((cmd->flags & AML_CMD_FLAG_REQ_CFM) && \
                (cmd->reqid != (lmac_msg_id_t)-1)) ? AML_ID2STR(cmd->reqid) : "none")); \
@@ -89,7 +91,7 @@ int aml_msg_task(void *data)
 #endif
     while (!aml_hw->aml_msg_task_quit) {
         if (down_interruptible(&aml_hw->aml_msg_sem) != 0) {
-            AML_PRINT(AML_DBG_MODULES_CMD, "%s:%d wait aml_msg_sem fail!\n", __func__, __LINE__);
+            AML_ERR("wait aml_msg_sem fail!\n");
             break;
         }
 
@@ -154,7 +156,7 @@ static int cmd_mgr_queue(struct aml_cmd_mgr *cmd_mgr, struct aml_cmd *cmd)
 
     if (cmd_mgr->state == AML_CMD_MGR_STATE_CRASHED) {
         u32 i;
-        AML_PRINT(AML_DBG_MODULES_CMD, KERN_CRIT"cmd queue crashed\n");
+        AML_ERR("cmd queue crashed\n");
         cmd->result = -EPIPE;
         spin_unlock_bh(&cmd_mgr->lock);
         if (aml_bus_type == PCIE_MODE) {
@@ -162,7 +164,7 @@ static int cmd_mgr_queue(struct aml_cmd_mgr *cmd_mgr, struct aml_cmd *cmd)
                 if (aml_hw->vif_table[i] != NULL) {
                     struct aml_vif *vif = aml_hw->vif_table[i];
                     for (i = 0; i < CMD_CRASH_FW_PC_NUM; i++) {
-                        AML_INFO("fw_pc:%08x", aml_read_reg(vif->ndev, AML_FW_PC_POINTER));
+                        AML_INFO("fw_pc:%08x", (aml_read_reg(vif->ndev, AML_FW_PC_POINTER) / 0x40));
                         mdelay(100);
                     }
                     break;
@@ -177,7 +179,7 @@ static int cmd_mgr_queue(struct aml_cmd_mgr *cmd_mgr, struct aml_cmd *cmd)
         struct aml_cmd *last;
 
         if (cmd_mgr->queue_sz == cmd_mgr->max_queue_sz) {
-            AML_PRINT(AML_DBG_MODULES_CMD, KERN_CRIT"Too many cmds (%d) already queued\n",
+            AML_WARN("Too many cmds (%d) already queued\n",
                    cmd_mgr->max_queue_sz);
             cmd->result = -ENOMEM;
             spin_unlock_bh(&cmd_mgr->lock);
@@ -187,7 +189,7 @@ static int cmd_mgr_queue(struct aml_cmd_mgr *cmd_mgr, struct aml_cmd *cmd)
         if (last->flags & (AML_CMD_FLAG_WAIT_ACK | AML_CMD_FLAG_WAIT_PUSH | AML_CMD_FLAG_WAIT_CFM)) {
 #if 0 // queue even NONBLOCK command.
             if (cmd->flags & AML_CMD_FLAG_NONBLOCK) {
-                AML_PRINT(AML_DBG_MODULES_CMD, KERN_CRIT"cmd queue busy\n");
+                AML_INFO(KERN_CRIT"cmd queue busy\n");
                 cmd->result = -EBUSY;
                 spin_unlock_bh(&cmd_mgr->lock);
                 return -EBUSY;
@@ -267,7 +269,7 @@ static int cmd_mgr_queue(struct aml_cmd_mgr *cmd_mgr, struct aml_cmd *cmd)
                     break;
                 }
             }
-            AML_PRINT(AML_DBG_MODULES_CMD, KERN_CRIT"cmd timed-out\n");
+            AML_ERR("cmd timed-out\n");
             cmd_dump(cmd);
             spin_lock_bh(&cmd_mgr->lock);
             cmd_mgr->state = AML_CMD_MGR_STATE_CRASHED;
@@ -289,9 +291,10 @@ static int cmd_mgr_queue(struct aml_cmd_mgr *cmd_mgr, struct aml_cmd *cmd)
             }
 #endif
             for (i = 0; i < CMD_CRASH_FW_PC_NUM; i++) {
-                AML_INFO("fw_pc:%08x\n", AML_REG_READ(aml_hw->plat, AML_ADDR_MAC_PHY, AML_FW_PC_POINTER));
+                AML_INFO("fw_pc:%08x\n", (AML_REG_READ(aml_hw->plat, AML_ADDR_MAC_PHY, AML_FW_PC_POINTER) / 0x40));
                 mdelay(100);
             }
+            aml_get_dbg_info(aml_hw);
         }
         #endif
     }
@@ -327,7 +330,7 @@ static int cmd_mgr_llind(struct aml_cmd_mgr *cmd_mgr, struct aml_cmd *cmd)
         }
     }
     if (!acked) {
-        AML_PRINT(AML_DBG_MODULES_CMD, KERN_CRIT "Error: acked cmd not found\n");
+        AML_ERR("Error: acked cmd not found\n");
     } else {
         cmd->flags &= ~AML_CMD_FLAG_WAIT_ACK;
         if (AML_CMD_WAIT_COMPLETE(cmd->flags)) {
@@ -481,8 +484,8 @@ static void cmd_mgr_drain(struct aml_cmd_mgr *cmd_mgr)
                 cur->a2e_msg = NULL;
             }
 
-            kfree(cur);
-            cur = NULL;
+            if (cur->flags & AML_CMD_FLAG_NONBLOCK)
+                kfree(cur);
         }
     }
     spin_unlock_bh(&cmd_mgr->lock);

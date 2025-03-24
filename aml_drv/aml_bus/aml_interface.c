@@ -1,3 +1,5 @@
+#define AML_MODULE                  INTERFACE
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -5,21 +7,77 @@
 #include "aml_static_buf.h"
 #include "aml_interface.h"
 #include "aml_compat.h"
-#include "wifi_debug.h"
+#include "aml_log.h"
+#include "usb_common.h"
 
 char *bus_type = "pci";
 unsigned int aml_bus_type;
+char *partner_cust = "default";
+unsigned int aml_partner_cust = DEFAULT_VER;
 unsigned char wifi_drv_rmmod_ongoing = 0;
-unsigned long long g_dbg_modules = 0xfff5fffe;
 struct aml_bus_state_detect bus_state_detect;
 struct aml_pm_type g_wifi_pm = {0};
+unsigned char g_wifi_in_insmod;
+unsigned char aml_wifi_detect_bt_status = 0;
+
+#define ICCM_CHECK
+#ifdef ICCM_CHECK
+unsigned char buf_iccm_rd[ICCM_BUFFER_RD_LEN];
+#endif
+
+const char *aml_log_level_names[] = {
+#define AML_LOG_LEVEL_NAME(_level)  [LOGLEVEL_##_level] = #_level
+    AML_LOG_LEVEL_NAME(EMERG),
+    AML_LOG_LEVEL_NAME(ALERT),
+    AML_LOG_LEVEL_NAME(CRIT),
+    AML_LOG_LEVEL_NAME(ERR),
+    AML_LOG_LEVEL_NAME(WARNING),
+    AML_LOG_LEVEL_NAME(NOTICE),
+    AML_LOG_LEVEL_NAME(INFO),
+    AML_LOG_LEVEL_NAME(DEBUG),
+#undef AML_LOG_LEVEL_NAME
+    NULL,
+};
+EXPORT_SYMBOL(aml_log_level_names);
+
+const char *aml_log_module_names[] = {
+#define AML_LOG_MODULE(_m, _level)  [AML_LOG_MODULE_##_m] = #_m,
+    AML_LOG_MODULES
+#undef AML_LOG_MODULE
+    NULL,
+};
+EXPORT_SYMBOL(aml_log_module_names);
+
+s8 aml_log_m_levels[AML_LOG_MODULE_MAX] = {
+#define AML_LOG_MODULE(_m, _level)  [AML_LOG_MODULE_##_m] = LOGLEVEL_##_level,
+    AML_LOG_MODULES
+#undef AML_LOG_MODULE
+};
+EXPORT_SYMBOL(aml_log_m_levels);
+
+int aml_name_index(const char *names[], const char *name)
+{
+    int i;
+
+    if (!names || !name)
+        return -1;
+
+    for (i = 0; names[i]; i++) {
+        if (strcasecmp(name, names[i]) == 0)
+            return i;
+    }
+    return -1;
+}
+EXPORT_SYMBOL(aml_name_index);
 
 EXPORT_SYMBOL(bus_state_detect);
 EXPORT_SYMBOL(wifi_drv_rmmod_ongoing);
 EXPORT_SYMBOL(bus_type);
 EXPORT_SYMBOL(aml_bus_type);
 EXPORT_SYMBOL(g_wifi_pm);
-EXPORT_SYMBOL(g_dbg_modules);
+EXPORT_SYMBOL(g_wifi_in_insmod);
+EXPORT_SYMBOL(aml_partner_cust);
+EXPORT_SYMBOL(aml_wifi_detect_bt_status);
 
 extern int aml_usb_insmod(void);
 extern int aml_usb_rmmod(void);
@@ -33,10 +91,13 @@ extern void aml_usb_reset(void);
 
 void bus_detect_work(struct work_struct *p_work)
 {
-    AML_PRINT(AML_DBG_MODULES_INTERFACE, "%s: enter\n", __func__);
+    AML_FN_ENTRY();
+#ifdef SDIO_MODE_ON
     if (aml_bus_type == SDIO_MODE) {
         aml_sdio_reset();
-    } else if (aml_bus_type == USB_MODE) {
+    }
+#endif
+    if (aml_bus_type == USB_MODE) {
         aml_usb_reset();
     }
     bus_state_detect.bus_err = 0;
@@ -46,6 +107,7 @@ void bus_detect_work(struct work_struct *p_work)
     }
     bus_state_detect.bus_reset_ongoing = 0;
 
+    AML_FN_EXIT();
     return;
 }
 static void state_detect_cb(struct timer_list* t)
@@ -58,8 +120,7 @@ static void state_detect_cb(struct timer_list* t)
     if (!bus_state_detect.is_drv_load_finished || (bus_state_detect.bus_err == 2)) {
         mod_timer(&bus_state_detect.timer, jiffies + AML_SDIO_STATE_MON_INTERVAL);
     } else {
-
-        AML_PRINT(AML_DBG_MODULES_INTERFACE, "%s: stop bus detected state timer\n", __func__);
+        AML_ERR("stop bus detected state timer\n");
     }
 }
 
@@ -81,42 +142,66 @@ void aml_bus_state_detect_deinit()
     bus_state_detect.is_drv_load_finished = 0;
 }
 
+void init_custom_ver()
+{
+    if (strncmp(partner_cust, "roku", 4) == 0)
+        aml_partner_cust = ROKU_VER;
+
+    AML_NOTICE("partner_cust:%d\n", aml_partner_cust);
+}
+
 int aml_bus_intf_insmod(void)
 {
     int ret;
+
+    AML_NOTICE("CONFIG_AML_LOG_BUILD_LEVEL=%s\n", aml_log_level_names[CONFIG_AML_LOG_BUILD_LEVEL]);
+
     if (aml_init_wlan_mem()) {
-        AML_PRINT(AML_DBG_MODULES_INTERFACE, "aml_init_wlan_mem fail\n");
+        AML_ERR("aml_init_wlan_mem fail\n");
         return -EPERM;
     }
     if (strncmp(bus_type,"usb",3) == 0) {
         aml_bus_type = USB_MODE;
         ret = aml_usb_insmod();
         if (ret) {
-            AML_PRINT(AML_DBG_MODULES_INTERFACE, "aml usb bus init fail\n");
+            AML_ERR("aml usb bus init fail\n");
         }
     } else if (strncmp(bus_type,"sdio",4) == 0) {
         aml_bus_type = SDIO_MODE;
+#ifdef SDIO_MODE_ON
         ret = aml_sdio_insmod();
         if (ret) {
-            AML_PRINT(AML_DBG_MODULES_INTERFACE, "aml sdio bus init fail\n");
+            AML_ERR("aml sdio bus init fail\n");
 #ifdef CONFIG_PT_MODE
             return ret;
 #endif
         }
+#endif
     } else if (strncmp(bus_type,"pci",3) == 0) {
         aml_bus_type = PCIE_MODE;
         ret = aml_pci_insmod();
         if (ret) {
-            AML_PRINT(AML_DBG_MODULES_INTERFACE, "aml sdio bus init fail\n");
+            AML_ERR("aml sdio bus init fail\n");
         }
     }
+
+    init_custom_ver();
+
     atomic_set(&g_wifi_pm.bus_suspend_cnt, 0);
     atomic_set(&g_wifi_pm.drv_suspend_cnt, 0);
     atomic_set(&g_wifi_pm.is_shut_down, 0);
+
+    if (bus_state_detect.bus_err) {
+        AML_ERR("aml sdio bus err:%d, insmod fail\n", bus_state_detect.bus_err);
+        return -1;
+    }
+
 #ifndef CONFIG_PT_MODE
+#ifdef SDIO_MODE_ON
     if (aml_bus_type == SDIO_MODE) {
         aml_bus_state_detect_init();
     }
+#endif
 #endif
 
     return 0;
@@ -126,24 +211,29 @@ void aml_bus_intf_rmmod(void)
     if (strncmp(bus_type,"usb",3) == 0) {
         aml_usb_rmmod();
     } else if (strncmp(bus_type,"sdio",4) == 0) {
+#ifdef SDIO_MODE_ON
         aml_sdio_rmmod();
+#endif
+#ifndef CONFIG_PT_MODE
+        aml_bus_state_detect_deinit();
+#endif
     } else if (strncmp(bus_type,"pci",3) == 0) {
         aml_pci_rmmod();
     }
-#ifndef CONFIG_PT_MODE
-    if (aml_bus_type == SDIO_MODE) {
-        aml_bus_state_detect_deinit();
-    }
-#endif
+
     aml_deinit_wlan_mem();
 }
 
+bt_shutdown_func g_bt_shutdown_func = NULL;
 lp_shutdown_func g_lp_wifi_shutdown_func = NULL;
 
 EXPORT_SYMBOL(aml_bus_state_detect_deinit);
 module_param(bus_type, charp,S_IRUSR | S_IRGRP | S_IROTH);
 MODULE_PARM_DESC(bus_type,"A string variable to adjust pci or sdio or usb bus interface");
+module_param(partner_cust, charp, S_IRUSR | S_IRGRP | S_IROTH);
+MODULE_PARM_DESC(partner_cust, "A string variable to adjust partner customized version");
 module_init(aml_bus_intf_insmod);
 module_exit(aml_bus_intf_rmmod);
 EXPORT_SYMBOL(g_lp_wifi_shutdown_func);
+EXPORT_SYMBOL(g_bt_shutdown_func);
 MODULE_LICENSE("GPL");
