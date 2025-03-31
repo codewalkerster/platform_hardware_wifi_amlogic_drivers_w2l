@@ -18,7 +18,7 @@
 #include <net/cfg80211.h>
 #include <net/ip.h>
 #include <linux/etherdevice.h>
-#include <linux/sched/clock.h>
+
 #include <net/addrconf.h>
 
 #include "aml_version_gen.h"
@@ -62,6 +62,7 @@
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0))
 #include <linux/panic_notifier.h>
+#include <linux/sched/clock.h>
 #endif
 
 #define RW_DRV_DESCRIPTION  "Amlogic 11nac driver for Linux cfg80211"
@@ -688,9 +689,15 @@ void aml_chanctx_link(struct aml_vif *vif, u8 ch_idx, struct cfg80211_chan_def *
     // For now chandef is NULL for STATION interface
     if (chandef) {
 
-        AML_INFO("band:%d, bw:%d cfreq:%d, cfreq offset:%d, cfreq1:%d, cfreq2:%d, cfreq1 offset:%d",
-            chandef->chan->band, chandef->width, chandef->chan->center_freq, chandef->chan->freq_offset,
-            chandef->center_freq1, chandef->center_freq2, chandef->freq1_offset);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
+                AML_INFO("band:%d, bw:%d cfreq:%d, cfreq offset:%d, cfreq1:%d, cfreq2:%d, cfreq1 offset:%d",
+                    chandef->chan->band, chandef->width, chandef->chan->center_freq, chandef->chan->freq_offset,
+                    chandef->center_freq1, chandef->center_freq2, chandef->freq1_offset);
+#else
+                AML_INFO("band:%d, bw:%d cfreq:%d, cfreq1:%d, cfreq2:%d",
+                    chandef->chan->band, chandef->width, chandef->chan->center_freq,
+                    chandef->center_freq1, chandef->center_freq2);
+#endif
 
         if ((!ctxt->chan_def.chan)
             || (chandef->chan->band != ctxt->chan_def.chan->band)

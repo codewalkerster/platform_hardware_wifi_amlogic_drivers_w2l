@@ -164,6 +164,7 @@ CONFIG_MDNS_OFFLOAD_FEATRUE ?= y
 # Support 4.9 ax
 ifeq ($(CONFIG_AML_KERNEL_4_9),y)
 CONFIG_KERNEL_AX_PATCH ?= y
+subdir-ccflags-y += -DWLAN_EID_EXTENSION=255
 endif
 # } // NEED 4.9 PATCH
 

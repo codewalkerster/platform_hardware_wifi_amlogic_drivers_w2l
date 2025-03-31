@@ -390,6 +390,12 @@ static struct sdio_driver aml_sdio_driver =
 int  aml_sdio_init(void)
 {
     int err = 0;
+    #if defined(CONFIG_AML_PLATFORM_ANDROID) && \
+        !defined(CONFIG_AML_SDIO_IRQ_VIA_GPIO) && \
+        LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)
+        /*kernel-4.9 needs to set sdio clock always on for datal interrupt */
+        sdio_clk_always_on(1);
+    #endif
 
     //amlwifi_set_sdio_host_clk(200000000);//200MHZ
 
