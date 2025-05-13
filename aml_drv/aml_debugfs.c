@@ -2333,7 +2333,7 @@ static void _aml_dbgfs_register_sta(struct aml_debugfs *aml_debugfs, struct aml_
     rate_stats->cpt = 0;
     rate_stats->rate_cnt = 0;
 
-    /* By default enable rate controller*/
+    /* By default enable rate controller */
     aml_debugfs->rc_config[sta->sta_idx] = -1;
 
     /* Unless we already fix the rate for this station */

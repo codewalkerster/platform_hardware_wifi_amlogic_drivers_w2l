@@ -1266,9 +1266,10 @@ int aml_usb_download_suspend_or_rf_fw(unsigned char fw_type)
         kmalloc_buf += len;
 
     //test kmalloc buf content
-    AML_INFO("start fw download, kmalloc buf:%08x, data:%08x\n", kmalloc_buf, *(unsigned int *)&kmalloc_buf[0]);
+    AML_INFO("start fw:%d download, kmalloc buf:%08x, data:%08x\n", fw_type, kmalloc_buf, *(unsigned int *)&kmalloc_buf[0]);
     hif_ops->hi_write_sram((unsigned char *)kmalloc_buf, (unsigned char *)base_addr, len, USB_EP4);
 
+#if 0
     memset(buf_iccm_rd, 0, ICCM_BUFFER_RD_LEN);
     hif_ops->hi_read_sram(buf_iccm_rd, (unsigned char*)(SYS_TYPE)base_addr, len, USB_EP4);
     if (memcmp(buf_iccm_rd, kmalloc_buf, len - 8)) {
@@ -1285,7 +1286,7 @@ int aml_usb_download_suspend_or_rf_fw(unsigned char fw_type)
             AML_INFO("rf fw download success!\n");
         }
     }
-
+#endif
     return 0;
 }
 

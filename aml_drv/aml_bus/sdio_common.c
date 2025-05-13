@@ -47,6 +47,9 @@ int (*host_resume_req)(struct device *device);
 extern void extern_wifi_set_enable(int is_on);
 extern void aml_sdio_random_word_write(unsigned int addr, unsigned int data);
 extern unsigned int aml_sdio_random_word_read(unsigned int addr);
+#if defined(CONFIG_AML_PLATFORM_ANDROID) || defined(CONFIG_AML_SDIO_IRQ_VIA_GPIO)
+extern void sdio_clk_always_on(bool clk_aws_on);
+#endif
 extern struct aml_pm_type g_wifi_pm;
 
 void chip_function_select_sdio(struct sdio_func *func) {
@@ -390,14 +393,18 @@ static struct sdio_driver aml_sdio_driver =
 int  aml_sdio_init(void)
 {
     int err = 0;
-    #if defined(CONFIG_AML_PLATFORM_ANDROID) && \
-        !defined(CONFIG_AML_SDIO_IRQ_VIA_GPIO) && \
-        LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)
-        /*kernel-4.9 needs to set sdio clock always on for datal interrupt */
-        sdio_clk_always_on(1);
-    #endif
 
     //amlwifi_set_sdio_host_clk(200000000);//200MHZ
+
+#if defined(CONFIG_AML_PLATFORM_ANDROID) && \
+    !defined(CONFIG_AML_SDIO_IRQ_VIA_GPIO) && \
+    LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)
+    /* kernel-4.9 needs to set sdio clock always on for data1 interrupt */
+    sdio_clk_always_on(1);
+#elif defined(CONFIG_AML_SDIO_IRQ_VIA_GPIO)
+    sdio_clk_always_on(0);
+    AML_INFO("aml sdio auto clk\n");
+#endif
 
     err = sdio_register_driver(&aml_sdio_driver);
     g_sdio_driver_insmoded = 1;

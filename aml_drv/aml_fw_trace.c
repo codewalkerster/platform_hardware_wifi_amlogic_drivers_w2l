@@ -59,6 +59,8 @@ struct log_file_info trace_log_file_info;
 struct aml_trace_nl_info g_trace_nl_info;
 
 extern struct auc_hif_ops g_auc_hif_ops;
+extern struct aml_hw *g_aml_hw;
+extern unsigned int trace_flag;
 
 int aml_send_log_to_user(char *pbuf, uint16_t len, int msg_type);
 
@@ -1132,6 +1134,7 @@ int aml_trace_log_to_file(uint16_t *trace, uint16_t *trace_limit)
 // recv msg handl function
 static void aml_recv_netlink(struct sk_buff *skb)
 {
+    struct aml_hw *aml_hw = g_aml_hw;
     struct nlmsghdr *nlh;
     struct log_nl_msg_info * nl_log_info = NULL;
     nlh = nlmsg_hdr(skb); // get msg body
@@ -1140,14 +1143,23 @@ static void aml_recv_netlink(struct sk_buff *skb)
     AML_INFO("receive data from user process: %s\n", (char *)NLMSG_DATA(nlh));
 
     nl_log_info = (struct nl_log_info*)NLMSG_DATA(nlh);
+    AML_INFO("msg type:%d\n", nl_log_info->msg_type);
     switch (nl_log_info->msg_type) {
         case AML_TRACE_FW_LOG_START:
             g_trace_nl_info.user_pid = nlh->nlmsg_pid;
             g_trace_nl_info.enable = 1;
+            if (!trace_flag) {
+                aml_send_fwlog_cmd(aml_hw, 1);
+                trace_flag = 1;
+            }
             AML_INFO("user space process (pid: %d) start recv fw log !!!!\n", g_trace_nl_info.user_pid);
             break;
         case AML_TRACE_FW_LOG_STOP:
             g_trace_nl_info.enable = 0;
+            if (trace_flag) {
+                aml_send_fwlog_cmd(aml_hw, 0);
+                trace_flag = 0;
+            }
             AML_INFO("user space process (pid: %d) stop recv fw log !!!!\n", g_trace_nl_info.user_pid);
             break;
         default:

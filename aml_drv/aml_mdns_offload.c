@@ -56,21 +56,20 @@ static int addProtocolResponses(struct aml_hw *aml_hw, char *networkInterface,
     matchCriteria *list = offloadData->matchCriteriaList;
     struct match_criteria list_lmac[MDNS_LIST_CRITERIA_MAX] = {0};
     int i = 0;
+    int ret;
     int index = MDNS_INDEX_ERR;
 
-    for (i = 0; i < offloadData->matchCriteriaListNum; ++i) {
+    // change type to reduce fw mem
+    for (i = 0; (i < offloadData->matchCriteriaListNum) && (i < MDNS_LIST_CRITERIA_MAX); ++i) {
         list_lmac[i].offset = offloadData->matchCriteriaList[i].nameOffset;
         list_lmac[i].type = offloadData->matchCriteriaList[i].type;
     }
 
     if (offloadData->rawOffloadPacketLen <= MDNS_RAW_DATA_LENGTH_MAX)
     {
-        index = aml_mdns_add_protocol_data_status(aml_hw, &list_lmac, offloadData->matchCriteriaListNum, offloadData->rawOffloadPacketLen);//data size err
-
-        if ((index < MDNS_INDEX_MAX) && (index != MDNS_INDEX_ERR))
-        {
-            aml_mdns_add_protocol_data(aml_hw, &list_lmac, offloadData->rawOffloadPacket, index, offloadData->rawOffloadPacketLen);
-        }
+        ret = aml_mdns_add_protocol_data_status(aml_hw, list_lmac, offloadData, &index); //data size err
+        if (ret == 0)
+        aml_mdns_add_protocol_data(aml_hw, offloadData->rawOffloadPacket, index, offloadData->rawOffloadPacketLen);
     }
     else
     {

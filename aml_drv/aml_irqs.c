@@ -23,6 +23,17 @@ int aml_dat1_irq_handler(struct aml_hw *aml_hw);
 u32 irq_handler_done;
 
 #ifdef SDIO_MODE_ON
+#ifdef CONFIG_AML_SDIO_IRQ_VIA_GPIO
+void aml_sdio_dat1_release(struct aml_hw *aml_hw)
+{
+
+}
+
+void aml_sdio_dat1_claim(struct aml_hw *aml_hw)
+{
+
+}
+#else
 void aml_sdio_dat1_release(struct aml_hw *aml_hw)
 {
     while (!irq_handler_done) {
@@ -46,7 +57,7 @@ void aml_sdio_dat1_claim(struct aml_hw *aml_hw)
     sdio_release_host(func);
     AML_RLMT_INFO("irq claim\n");
 }
-
+#endif
 void aml_enable_sdio_irq(struct aml_hw *aml_hw)
 {
     uint32_t en_irq = 0;

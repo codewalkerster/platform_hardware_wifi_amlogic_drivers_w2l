@@ -965,7 +965,7 @@ static int aml_amsdu_add_subframe_header(struct aml_hw *aml_hw,
  *
  */
 static bool aml_amsdu_add_subframe(struct aml_hw *aml_hw, struct sk_buff *skb,
-                                    struct aml_sta *sta, struct aml_txq *txq)
+                                    struct aml_sta *sta, struct aml_txq *txq, bool sp_frame)
 {
     bool res = false;
     struct ethhdr *eth;
@@ -999,7 +999,7 @@ static bool aml_amsdu_add_subframe(struct aml_hw *aml_hw, struct sk_buff *skb,
             goto end;
         }
 
-        if ((sw_txhdr->desc.api.host.flags & TXU_CNTRL_SP_FRAME) ||
+        if (sp_frame || (sw_txhdr->desc.api.host.flags & TXU_CNTRL_SP_FRAME) ||
             ((sw_txhdr->amsdu.len + sw_txhdr->amsdu.pad +
               aml_amsdu_subframe_length(eth, skb->len)) > txq->amsdu_len) ||
             aml_amsdu_add_subframe_header(aml_hw, skb, sw_txhdr)) {
@@ -1026,7 +1026,7 @@ static bool aml_amsdu_add_subframe(struct aml_hw *aml_hw, struct sk_buff *skb,
         txhdr = (struct aml_txhdr *)skb_prev->data;
         sw_txhdr = txhdr->sw_hdr;
         if ((sw_txhdr->amsdu.len) ||
-            (sw_txhdr->desc.api.host.flags & TXU_CNTRL_RETRY) || (sw_txhdr->desc.api.host.flags & TXU_CNTRL_SP_FRAME))
+            (sw_txhdr->desc.api.host.flags & TXU_CNTRL_RETRY) || (sw_txhdr->desc.api.host.flags & TXU_CNTRL_SP_FRAME) || sp_frame)
             /* previous buffer is already a complete amsdu or a retry or special frame */
             goto end;
 
@@ -1382,8 +1382,13 @@ uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E 
                         }
 
                         ret |= AML_P2P_ACTION_FRAME;
+
                         //P2P_ACTION_GO_NEG_RSP & P2P_ACTION_GO_NEG_CFM & P2P_ACTION_INVIT_RSP:need sw retry
-                        if ((oui_subtype == P2P_ACTION_GO_NEG_RSP) || (oui_subtype == P2P_ACTION_GO_NEG_CFM) || (oui_subtype == P2P_ACTION_INVIT_RSP)) {
+                        if ((oui_subtype == P2P_ACTION_GO_NEG_RSP)
+                            || (oui_subtype == P2P_ACTION_GO_NEG_CFM)
+                            || (oui_subtype == P2P_ACTION_INVIT_RSP)
+                            || (oui_subtype == P2P_ACTION_INVIT_REQ)
+                            || (oui_subtype == P2P_ACTION_GO_NEG_REQ)) {
                             ret |= AML_SP_FRAME;
                             if ((oui_subtype == P2P_ACTION_GO_NEG_CFM) || (oui_subtype == P2P_ACTION_INVIT_RSP)) {
                                 ret |= AML_MUST_TX_SUC;
@@ -1527,6 +1532,12 @@ uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E 
         case PROBE_RSP_TYPE: {
             if (sp_status == SP_STATUS_TX_START) {
                 aml_scc_save_probe_rsp(vif, (u8*)buf, frame_len);
+            }
+
+            if (vif->vif_index == AML_P2P_DEVICE_VIF_IDX) {
+                if (aml_get_p2p_ie_offset(buf, frame_len, MAC_SHORT_MAC_HDR_LEN + PROBE_RSP_HDR_LEN)) {
+                    vif->aml_hw->wfd_present = true;
+                }
             }
             return ret;
         }
@@ -1690,7 +1701,7 @@ netdev_tx_t aml_start_xmit(struct sk_buff *skb, struct net_device *dev)
     if (aml_filter_sp_data_frame(skb, aml_vif, SP_STATUS_TX_START)) {
         sp_frame = true;
         txq = aml_txq_sta_get(sta, tid, aml_hw);
-        tid = 0xff;
+        //tid = 0xff;
     } else {
         txq = aml_txq_sta_get(sta, tid, aml_hw);
     }
@@ -1700,7 +1711,7 @@ netdev_tx_t aml_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 
 #ifdef CONFIG_AML_AMSDUS_TX
-    if (aml_amsdu_add_subframe(aml_hw, skb, sta, txq))
+    if (aml_amsdu_add_subframe(aml_hw, skb, sta, txq, sp_frame))
         return NETDEV_TX_OK;
 #endif
 
@@ -1879,7 +1890,7 @@ int aml_start_mgmt_xmit(struct aml_vif *vif, struct aml_sta *sta,
         return -ENOMEM;
     *cookie = (unsigned long)skb;
 
-    sw_txhdr = kmem_cache_alloc(aml_hw->sw_txhdr_cache, GFP_ATOMIC);
+    sw_txhdr = kmem_cache_zalloc(aml_hw->sw_txhdr_cache, GFP_ATOMIC);
     if (unlikely(sw_txhdr == NULL)) {
         dev_kfree_skb(skb);
         return -ENOMEM;
@@ -1987,13 +1998,6 @@ int aml_start_mgmt_xmit(struct aml_vif *vif, struct aml_sta *sta,
             sdio_txhdr->cksum_flag = 0;
             memset(&sdio_txhdr->desc, 0, sizeof(struct txdesc_host)/*8 byte alignment*/);
         }
-    }
-
-    /* In order to avoid neg cfm timeout. When the rest of roc time is less than 10ms, sending neg rsp next time.*/
-    if (aml_hw->roc && (aml_hw->roc->duration - jiffies_to_msecs(jiffies - aml_hw->roc->start_time) <= P2P_NEG_RSP_DROP_TIME) && vif->p2p_negotiation_state == P2P_NEG_SEND_NEG_RSP) {
-        AML_INFO("The rest of roc time is less than 10ms, drop the neg rsp frame!\n");
-        cfg80211_mgmt_tx_status(&(vif->wdev), *cookie, params->buf, params->len, 0, GFP_ATOMIC);
-        return 0;
     }
 
     /* queue the buffer */
@@ -2336,21 +2340,25 @@ int aml_tx_cfm_task(void *data)
 
                 if (!cfm.status.acknowledged
                     && ((sp_ret & AML_GAS_ACTION_FRAME) || (sp_ret & AML_MUST_TX_SUC))
-                    && aml_hw->roc
                     && (txq->idx != TXQ_INACTIVE)) {
-                    AML_INFO("retry frame during roc:0x%x", sp_ret);
-                    aml_tx_retry(aml_hw, skb, sw_txhdr, cfm.status);
-                    continue;
+                    spin_lock_bh(&aml_hw->roc_lock);
+                    if (aml_hw->roc && (jiffies_to_msecs(jiffies - aml_hw->roc->start_time) <= aml_hw->roc->duration)) {
+                        spin_unlock_bh(&aml_hw->roc_lock);
+                        AML_INFO("retry frame during roc:0x%x", sp_ret);
+                        aml_tx_retry(aml_hw, skb, sw_txhdr, cfm.status);
+                        continue;
+                    }
+                    spin_unlock_bh(&aml_hw->roc_lock);
                 }
 
                 if (cfm.status.acknowledged && (sp_ret & AML_GAS_INIT_REQ_FRAME)) {
                     sw_txhdr->aml_vif->tx_cfm_wait.skb = skb_copy(skb, GFP_ATOMIC);
                     if (sw_txhdr->aml_vif->tx_cfm_wait.skb) {
-                        sw_txhdr->aml_vif->tx_cfm_wait.cookie = (unsigned long)skb;
+                        sw_txhdr->aml_vif->tx_cfm_wait.cookie = (u64)skb;
                         sw_txhdr->aml_vif->tx_cfm_wait.len = sw_txhdr->frame_len;
                         sw_txhdr->aml_vif->tx_cfm_wait.wdev = &sw_txhdr->aml_vif->wdev;
                         cfm_tx_status = false;
-                        AML_INFO("gas init frame tx cfm delay, wait for rsp");
+                        AML_INFO("gas init frame tx cfm delay, wait for rsp:%llx", sw_txhdr->aml_vif->tx_cfm_wait.cookie);
                     }
                 }
 
@@ -2523,21 +2531,25 @@ int aml_txdatacfm(void *pthis, void *arg)
 
         if (!cfm->status.acknowledged
             && ((sp_ret & AML_GAS_ACTION_FRAME) || (sp_ret & AML_MUST_TX_SUC))
-            && aml_hw->roc
             && (txq->idx != TXQ_INACTIVE)) {
-            AML_INFO("retry frame during roc:0x%x", sp_ret);
-            aml_tx_retry(aml_hw, skb, sw_txhdr, cfm->status);
-            return 0;
+            spin_lock_bh(&aml_hw->roc_lock);
+            if (aml_hw->roc && (jiffies_to_msecs(jiffies - aml_hw->roc->start_time) <= aml_hw->roc->duration)) {
+                spin_unlock_bh(&aml_hw->roc_lock);
+                AML_INFO("retry frame during roc:0x%x", sp_ret);
+                aml_tx_retry(aml_hw, skb, sw_txhdr, cfm->status);
+                return 0;
+            }
+            spin_unlock_bh(&aml_hw->roc_lock);
         }
 
         if (cfm->status.acknowledged && (sp_ret & AML_GAS_INIT_REQ_FRAME)) {
             sw_txhdr->aml_vif->tx_cfm_wait.skb = skb_copy(skb, GFP_ATOMIC);
             if (sw_txhdr->aml_vif->tx_cfm_wait.skb) {
-                sw_txhdr->aml_vif->tx_cfm_wait.cookie = (unsigned long)skb;
+                sw_txhdr->aml_vif->tx_cfm_wait.cookie = (u64)skb;
                 sw_txhdr->aml_vif->tx_cfm_wait.len = sw_txhdr->frame_len;
                 sw_txhdr->aml_vif->tx_cfm_wait.wdev = &sw_txhdr->aml_vif->wdev;
                 cfm_tx_status = false;
-                AML_INFO("gas init frame tx cfm delay, wait for rsp");
+                AML_INFO("gas init frame tx cfm delay, wait for rsp:%llx", sw_txhdr->aml_vif->tx_cfm_wait.cookie);
             }
         }
 
@@ -2692,20 +2704,26 @@ void aml_tx_cfm_wait_rsp(struct aml_hw *aml_hw, bool ack, u8* func, u32 line)
 {
     struct aml_vif *vif;
     struct aml_roc *roc = aml_hw->roc;
+
     if (!roc)
         return;
 
+    spin_lock_bh(&aml_hw->tx_wait_cfm_lock);
     vif = roc->vif;
-    if (vif->tx_cfm_wait.cookie == 0)
-        return;
 
-    cfg80211_mgmt_tx_status(vif->tx_cfm_wait.wdev,
-                        vif->tx_cfm_wait.cookie, skb_mac_header(vif->tx_cfm_wait.skb),
-                        vif->tx_cfm_wait.len,
-                        ack,
-                        GFP_ATOMIC);
+    if (vif->tx_cfm_wait.cookie != 0) {
+        AML_INFO("ack:%d, [%s %d], cookie:%llx", ack, func, line, vif->tx_cfm_wait.cookie);
 
-    consume_skb(vif->tx_cfm_wait.skb);
-    vif->tx_cfm_wait.cookie = 0;
-    AML_INFO("ack:%d, [%s %d]", ack, func, line);
+        cfg80211_mgmt_tx_status(vif->tx_cfm_wait.wdev,
+                            vif->tx_cfm_wait.cookie, skb_mac_header(vif->tx_cfm_wait.skb),
+                            vif->tx_cfm_wait.len,
+                            ack,
+                            GFP_ATOMIC);
+
+        vif->tx_cfm_wait.cookie = 0;
+        consume_skb(vif->tx_cfm_wait.skb);
+    }
+
+    spin_unlock_bh(&aml_hw->tx_wait_cfm_lock);
 }
+

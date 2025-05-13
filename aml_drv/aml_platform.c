@@ -2222,10 +2222,15 @@ void aml_platform_off(struct aml_hw *aml_hw, void **config)
     if (config)
         *config = aml_term_save_config(aml_hw->plat);
 
+#ifdef CONFIG_AML_SDIO_IRQ_VIA_GPIO
+        if (aml_hw->plat->disable)
+            aml_hw->plat->disable(aml_hw);
+#else
     if (!bus_state_detect.is_recy_ongoing) {
         if (aml_hw->plat->disable)
             aml_hw->plat->disable(aml_hw);
     }
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0) // template solution for S905L3A
 #ifndef CONFIG_AML_USE_TASK
@@ -2484,10 +2489,10 @@ static int aml_pci_platform_enable(struct aml_hw *aml_hw)
 {
     int ret;
 #ifdef SDIO_MODE_ON
-#if 1
-    struct sdio_func *func = aml_priv_to_func(SDIO_FUNC1);
-#else
+#ifdef CONFIG_AML_SDIO_IRQ_VIA_GPIO
     unsigned int irq_flag = 0;
+#else
+    struct sdio_func *func = aml_priv_to_func(SDIO_FUNC1);
 #endif
 #endif
 
@@ -2496,15 +2501,10 @@ static int aml_pci_platform_enable(struct aml_hw *aml_hw)
         ret = request_irq(aml_hw->plat->pci_dev->irq, aml_irq_pcie_hdlr, 0,
                           "aml", aml_hw);
         AML_INFO("irq:%d, ret:%d", aml_hw->plat->pci_dev->irq, ret);
+    }
 #ifdef SDIO_MODE_ON
-    } else if(aml_bus_type == SDIO_MODE) {
-#if 1
-        dev_set_drvdata(&func->dev, aml_hw);
-        sdio_claim_host(func);
-        sdio_claim_irq(func, aml_irq_sdio_hdlr_for_pt);
-        sdio_release_host(func);
-        AML_INFO(" claim_irq ret=%d\n", ret);
-#else
+    else if(aml_bus_type == SDIO_MODE) {
+#ifdef CONFIG_AML_SDIO_IRQ_VIA_GPIO
 #ifndef CONFIG_LINUXPC_VERSION
         aml_hw->irq = wifi_irq_num();
         irq_flag = IORESOURCE_IRQ | IORESOURCE_IRQ_LOWLEVEL | IORESOURCE_IRQ_SHAREABLE;
@@ -2512,9 +2512,16 @@ static int aml_pci_platform_enable(struct aml_hw *aml_hw)
         ret = request_irq(aml_hw->irq, aml_irq_sdio_hdlr, irq_flag, "aml", aml_hw);
         AML_INFO(" request_irq ret=%d\n", ret);
 #endif
+#else
+        dev_set_drvdata(&func->dev, aml_hw);
+        sdio_claim_host(func);
+        sdio_claim_irq(func, aml_irq_sdio_hdlr_for_pt);
+        sdio_release_host(func);
+        AML_INFO(" claim_irq ret=%d\n", ret);
 #endif
+    }
 #endif
-    } else {
+    else {
         ret = -1;
     }
     return ret;
@@ -2523,7 +2530,13 @@ static int aml_pci_platform_enable(struct aml_hw *aml_hw)
 extern u32 irq_handler_done;
 static int aml_pci_platform_disable(struct aml_hw *aml_hw)
 {
-#if 1
+#ifdef CONFIG_AML_SDIO_IRQ_VIA_GPIO
+    if (aml_bus_type == SDIO_MODE) {
+        free_irq(aml_hw->irq, aml_hw);
+    } else if (aml_bus_type == PCIE_MODE) {
+        free_irq(aml_hw->plat->pci_dev->irq, aml_hw);
+    }
+#else
 #ifdef SDIO_MODE_ON
     unsigned char wait_cnt = 0;
 
@@ -2546,12 +2559,6 @@ static int aml_pci_platform_disable(struct aml_hw *aml_hw)
     sdio_release_irq(func);
     sdio_release_host(func);
 #endif
-#else
-    if (aml_bus_type == SDIO_MODE) {
-        free_irq(aml_hw->irq, aml_hw);
-    } else if (aml_bus_type == PCIE_MODE) {
-        free_irq(aml_hw->plat->pci_dev->irq, aml_hw);
-    }
 #endif
 
     return 0;
@@ -2604,6 +2611,7 @@ int aml_platform_register_sdio_drv(void)
         return 0;
     }
     dev_set_drvdata(&func->dev, drv_data);
+    g_aml_hw = drv_data;
 
 #ifdef CONFIG_AML_RX_SG
     g_mmc_misc = kmalloc(sizeof(struct mmc_misc) * RXDESC_CNT_READ_ONCE, GFP_ATOMIC);
@@ -2627,8 +2635,15 @@ void aml_platform_unregister_sdio_drv(void)
 
     if (aml_platform_init_ok) {
         aml_hw = dev_get_drvdata(&func->dev);
-        if (aml_hw == NULL)
-            goto err_drvdata;
+        if (aml_hw == NULL) {
+            if (g_aml_hw) {
+                aml_hw = g_aml_hw;
+                g_aml_hw = NULL;
+            } else {
+                AML_ERR("can't get aml_hw, need to check\n");
+                goto err_drvdata;
+            }
+        }
 
         aml_plat = aml_hw->plat;
         aml_platform_deinit(aml_hw);

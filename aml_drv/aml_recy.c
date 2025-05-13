@@ -302,10 +302,15 @@ Try_again:
         dev_set_drvdata(&func->dev, aml_hw);
     }
 #endif
+
+#ifdef CONFIG_AML_SDIO_IRQ_VIA_GPIO
+#else
+    /*FIXME:maybe sdio dat1 intr need*/
     if (bus_state_detect.is_recy_ongoing) {
         if (aml_hw->plat->disable)
             aml_hw->plat->disable(aml_hw);
     }
+#endif
 
     if (bus_state_detect.bus_err == 1 || atomic_read(&g_wifi_pm.is_shut_down)
         || atomic_read(&g_wifi_pm.bus_suspend_cnt)) {
@@ -686,6 +691,7 @@ int aml_recy_doit(struct aml_hw *aml_hw)
             aml_hw->trace_bit_flag |= TRACE_ENABLE_BIT_FLAG;
             aml_detection_trace_init(aml_hw);
         }
+        aml_send_sync_trace(aml_hw);
     }
     notify_bt_event(0);
 

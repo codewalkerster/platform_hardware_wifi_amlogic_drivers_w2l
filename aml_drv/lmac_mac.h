@@ -444,7 +444,7 @@ enum mac_sta_flags
     STA_OPMOD_NOTIF = BIT(4),
     /// Bit indicating that a STA has HE capability
     STA_HE_CAPA = BIT(5),
-    /// Bit indicating supprot for short Preamble in ERP
+    /// Bit indicating support for short Preamble in ERP
     STA_SHORT_PREAMBLE_CAPA = BIT(6),
 };
 

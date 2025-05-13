@@ -18,6 +18,8 @@
 #endif
 #include "aml_main.h"
 
+extern struct aml_pm_type g_wifi_pm;
+
 struct aml_wq *aml_wq_alloc(int len)
 {
     struct aml_wq *aml_wq = NULL;
@@ -141,6 +143,31 @@ static void aml_wq_doit(struct work_struct *work)
                 aml_nan_send_publish_request(aml_hw, (wifi_nan_publish_cfg *)aml_wq->data);
                 break;
 #endif
+            case AML_WQ_WAIT_USB:
+            {
+                int error;
+                int cnt = 0;
+                while (atomic_read(&g_wifi_pm.bus_suspend_cnt) > 0)
+                {
+                    msleep(50);
+                    cnt++;
+                    if (cnt > 200)
+                    {
+                        AML_INFO("no resume cnt 0x%x\n",
+                                atomic_read(&g_wifi_pm.bus_suspend_cnt));
+                        atomic_set(&g_wifi_pm.bus_suspend_cnt, 0);
+                        return;
+                    }
+                }
+                error = aml_ps_wow_resume(aml_hw);
+                if (error) {
+                    AML_INFO("resume err:%d\n", error);
+                    break;
+                }
+                atomic_set(&g_wifi_pm.drv_suspend_cnt, 0);
+                AML_DBG(AML_FN_ENTRY_STR);
+                break;
+            }
             default:
                 AML_INFO("wq type(%d) unknown", aml_wq->id);
                 break;

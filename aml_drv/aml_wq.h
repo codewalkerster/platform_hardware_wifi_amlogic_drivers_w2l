@@ -39,6 +39,7 @@ enum aml_wq_type {
     AML_WQ_NAN_SEND_FOLLOW_UP_MSG,
     AML_WQ_NAN_SEND_PUBLISH_MSG,
 #endif
+    AML_WQ_WAIT_USB,
     AML_WQ_MAX,
 };
 

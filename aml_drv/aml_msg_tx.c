@@ -33,6 +33,7 @@
 #include "aml_main.h"
 #include "aml_p2p.h"
 
+
 const struct mac_addr mac_addr_bcst = {{0xFFFF, 0xFFFF, 0xFFFF}};
 extern struct aml_pm_type g_wifi_pm;
 
@@ -866,6 +867,10 @@ int aml_send_roc(struct aml_hw *aml_hw, struct aml_vif *vif,
 int aml_send_cancel_roc(struct aml_hw *aml_hw)
 {
     struct mm_remain_on_channel_req *req;
+    struct aml_roc *roc = aml_hw->roc;
+
+    if (roc)
+        aml_hw->roc_is_canceling = true;
 
     AML_DBG(AML_FN_ENTRY_STR);
 
@@ -4207,8 +4212,7 @@ int aml_mdns_reset_all(struct aml_hw *aml_hw)
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
-int aml_mdns_add_protocol_data_status(struct aml_hw *aml_hw, void *list_param, uint8_t list_len,
-                                uint16_t data_len)
+int aml_mdns_add_protocol_data_status(struct aml_hw *aml_hw, void *list_param, mdnsProtocolData *offloadData, int *index)
 {
     struct mdns_adddata_cfm cfm;
     int ret;
@@ -4217,27 +4221,31 @@ int aml_mdns_add_protocol_data_status(struct aml_hw *aml_hw, void *list_param, u
     if (!req)
         return -ENOMEM;
 
-    if (list_len > MDNS_LIST_CRITERIA_MAX || data_len > MDNS_RAW_DATA_LENGTH_MAX) {
+    if ((offloadData->matchCriteriaListNum > MDNS_LIST_CRITERIA_MAX)
+        || (offloadData->rawOffloadPacketLen > MDNS_RAW_DATA_LENGTH_MAX)) {
         aml_priv_msg_free(aml_hw, req);
         return -ENOMEM;
     }
 
-    req->list_len = list_len;
-    req->data_len = data_len;
+    req->list_len = offloadData->matchCriteriaListNum;
+    req->data_len = offloadData->rawOffloadPacketLen;
 
-    memcpy(req->list_criteria, list_param, list_len * sizeof(struct match_criteria));
+    memcpy(req->list_criteria, list_param, req->list_len * sizeof(struct match_criteria));
 
     ret = aml_priv_send_msg(aml_hw, req, 1, PRIV_MDNS_ADDDATA_CFM, &cfm);
     if (ret != 0)
         return ret;
 
     if (cfm.state != CO_OK)
-        return -1;
+        return -EPERM;
 
-    return cfm.index;
+    *index = cfm.index;
+
+    return 0;
 }
 
-int aml_mdns_add_protocol_data(struct aml_hw *aml_hw, void *list_param, uint8_t *raw_data, uint8_t index, uint16_t data_len)//开机时设置
+
+int aml_mdns_add_protocol_data(struct aml_hw *aml_hw, uint8_t *raw_data, uint8_t index, uint16_t data_len)
 {
 
     int ret;
@@ -4272,6 +4280,9 @@ int aml_mdns_get_reset_hit_counter(struct aml_hw *aml_hw, int index)
     struct mdns_get_hit_cfm cfm;
     struct mm_mdns_get_hit *req;
     int ret;
+
+    if (index >= MDNS_DATA_MAX)
+        return -ENOMEM;
 
     req = aml_priv_msg_zalloc(MDNS_GET_HIT, sizeof(struct mm_mdns_get_hit));
     if (!req)
@@ -4513,7 +4524,7 @@ int aml_send_scc_conflict_notify(struct aml_vif *ap_vif, u8 sta_vif_idx, struct 
 int aml_send_sync_trace(struct aml_hw *aml_hw)
 {
     static u32 sync_token = 0;
-    sync_trace_t *sync_trace;
+    sync_trace_token *sync_trace;
     if (atomic_read(&g_wifi_pm.drv_suspend_cnt) == 1 || atomic_read(&g_wifi_pm.bus_suspend_cnt) == 1) {
         AML_INFO("driver in suspend not send sync trace");
         return -1;
@@ -4522,12 +4533,15 @@ int aml_send_sync_trace(struct aml_hw *aml_hw)
     if (sync_token == 0) {
         get_random_bytes(&sync_token, 2);
     }
-    sync_trace =  aml_priv_msg_zalloc(MM_SYNC_TRACE, sizeof(sync_trace_t));
+    sync_trace =  aml_priv_msg_zalloc(MM_SYNC_TRACE, sizeof(sync_trace_token));
     if (!sync_trace) {
         return -ENOMEM;
     }
-    AML_INFO("sync token[%d]", sync_token);
+
     sync_trace->token = sync_token++;
+    sync_trace->time = ktime_get_ns();
+    AML_INFO("sync token[%d] time[%llu]", sync_trace->token, sync_trace->time);
+
     return aml_priv_send_msg(aml_hw, sync_trace, 0, 0, NULL);
 }
 
@@ -4721,10 +4735,15 @@ int aml_set_mcc_ratio(struct aml_vif *aml_vif, int ratio)
     if (!mcc_ratio_param)
         return -ENOMEM;
 
+    if (ratio < 1 || ratio > 9) {
+        AML_INFO("ratio para error, should[1:9], set:%d,", ratio);
+        return -ENOMEM;
+    }
+
     mcc_ratio_param->mcc_ratio = ratio;
     AML_INFO("ratio:%d", ratio);
     /* coverity[leaked_storage] - mcc_ratio_param will be freed later */
-    return aml_priv_send_msg(aml_hw, mcc_ratio_param, 0, 0, NULL);
+    return aml_priv_send_msg(aml_hw, mcc_ratio_param, 0, MM_MSG_BYPASS_ID, NULL);
 }
 
 int aml_set_wfa_rts_based_txop(struct aml_vif *aml_vif, int enable)

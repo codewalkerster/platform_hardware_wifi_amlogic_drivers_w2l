@@ -5,6 +5,7 @@
 #include "aml_scc.h"
 
 #define P2P_ACTION_HDR_LEN          8
+#define PROBE_RSP_HDR_LEN           12
 #define GO_INTENT_H                 15
 #define GO_INTENT_L                 0
 #define P2P_ELEMENT_HDR_LEN         6

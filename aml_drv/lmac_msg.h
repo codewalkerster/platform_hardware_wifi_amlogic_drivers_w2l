@@ -82,11 +82,11 @@ enum
 //for mdns offload
 #define MDNS_RAW_DATA_LENGTH_MAX    492
 #define MDNS_LIST_CRITERIA_MAX      8
-#define MDNS_QNAME_LENGTH_MAX       80
+#define MDNS_QNAME_LENGTH_MAX       256
 
 #define MAX_SCHED_SCAN_PLANS 1
 #define MAX_MATCH_COUNT 2
-
+#define MDNS_DATA_MAX 3
 
 /// For MAC HW States copied from "hal_machw.h"
 enum
@@ -3407,7 +3407,8 @@ struct mm_scc_cfm
 typedef struct
 {
     unsigned int token;
-} sync_trace_t;
+    unsigned long long time;
+} sync_trace_token;
 
 struct dhcp_to_host_ind
 {

@@ -13,10 +13,7 @@
 #include "aml_interface.h"
 #include "aml_log.h"
 #include "chip_bt_pmu_reg.h"
-
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0))
 #include <linux/sched/clock.h>
-#endif
 
 struct auc_hif_ops g_auc_hif_ops;
 struct usb_device *g_udev = NULL;

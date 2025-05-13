@@ -872,6 +872,7 @@ struct aml_hw {
     struct aml_survey_info survey[SCAN_CHANNEL_MAX];
     struct aml_roc *roc;
     spinlock_t roc_lock;
+    spinlock_t tx_wait_cfm_lock;
     struct cfg80211_scan_request *scan_request;
     struct aml_radar radar;
     int show_switch_info;
@@ -1074,6 +1075,7 @@ struct aml_hw {
     bool wfd_present;
     bool wifi_suspend_err;
     bool usb_rst_test;
+    bool roc_is_canceling;
 };
 
 extern unsigned int aml_partner_cust;

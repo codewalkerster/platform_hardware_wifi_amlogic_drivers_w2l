@@ -269,7 +269,7 @@ static void ipc_sdio_host_msgack_handler(struct ipc_host_env_tag *env)
 }
 
 /**
- * ipc_host_msgack_handler() - Handle the reception of message acknowledgment
+ * ipc_host_msgack_handler() - Handle the reception of message acknowledgement
  *
  * @env: pointer to the IPC Host environment
  *
@@ -1135,7 +1135,7 @@ void aml_sdio_usb_extend_irq_handle(struct aml_hw *aml_hw)
             aml_hw->dynabuf_stop_tx = 0;
             up(&aml_hw->aml_tx_sem);
             break;
-        case DYNAMIC_BUF_LA_SWITCH_FINSH:
+        case DYNAMIC_BUF_LA_SWITCH_FINISH:
             AML_INFO("la page had been released completely!\n");
             break;
         case DYNAMIC_BUF_TRACE_EXPEND_FINISH:

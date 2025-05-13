@@ -477,12 +477,11 @@ void aml_tcp_delay_ack_init(struct aml_hw *aml_hw)
 
     if (aml_bus_type == USB_MODE) {
         atomic_set(&ack_mgr->max_drop_cnt, MAX_DROP_TCP_ACK_CNT_USB);
-        atomic_set(&ack_mgr->dynamic_adjust, 0);
     } else {
         atomic_set(&ack_mgr->max_drop_cnt, MAX_DROP_TCP_ACK_CNT);
-        atomic_set(&ack_mgr->dynamic_adjust, 1);
     }
 
+    atomic_set(&ack_mgr->dynamic_adjust, 0);
     ack_mgr->last_time = jiffies;
     ack_mgr->total_drop_cnt = 0;
     ack_mgr->timeout = msecs_to_jiffies(TCK_SESS_TIMEOUT_TIME);

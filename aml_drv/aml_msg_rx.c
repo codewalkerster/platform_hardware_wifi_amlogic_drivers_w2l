@@ -465,33 +465,34 @@ static inline int aml_rx_remain_on_channel_exp_ind(struct aml_hw *aml_hw,
     return 0;
 
 #else
-    struct aml_roc *roc = aml_hw->roc;
     struct aml_vif *aml_vif;
 
-    if (!aml_hw->roc)
+    spin_lock_bh(&aml_hw->roc_lock);
+    if (!aml_hw->roc) {
+        spin_unlock_bh(&aml_hw->roc_lock);
         return 0;
+    }
 
-    aml_vif= roc->vif;
+    aml_vif= aml_hw->roc->vif;
     aml_vif->p2p_negotiation_state = P2P_NOT_IN_NEG;
 
     aml_tx_cfm_wait_rsp(aml_hw, false, __func__, __LINE__);
     trace_roc_exp(aml_vif->vif_index);
 
-    AML_INFO("roc internal=%d, on_chan=%d cookie:0x%llu\n",roc->internal,roc->on_chan,roc);
-    if (!roc->internal && roc->on_chan) {
+    AML_INFO("roc internal=%d, on_chan=%d cookie:0x%llu\n",aml_hw->roc->internal, aml_hw->roc->on_chan, aml_hw->roc);
+    if (!aml_hw->roc->internal && aml_hw->roc->on_chan) {
         // If RoC has been started by the user space and hasn't been cancelled,
         // inform it that off-channel period has expired
-        cfg80211_remain_on_channel_expired(&aml_vif->wdev, (u64)(roc),
-                                           roc->chan, GFP_ATOMIC);
+        cfg80211_remain_on_channel_expired(&aml_vif->wdev, (u64)(aml_hw->roc),
+                                           aml_hw->roc->chan, GFP_ATOMIC);
     }
 
     aml_txq_offchan_deinit(aml_vif);
-    spin_lock_bh(&aml_hw->roc_lock);
-    kfree(roc);
+    kfree(aml_hw->roc);
     aml_hw->roc = NULL;
     spin_unlock_bh(&aml_hw->roc_lock);
-
 #endif /* CONFIG_AML_SOFTMAC */
+    aml_hw->roc_is_canceling = false;
     return 0;
 }
 
@@ -1565,6 +1566,9 @@ static inline int aml_rx_sm_connect_ind(struct aml_hw *aml_hw,
                                         GFP_ATOMIC);
 
 #endif
+                if ((ind->status_code != 0) && (aml_recy) && (aml_vif->vif_index == aml_recy->assoc_info.vif_idx)) {
+                    aml_recy_flags_clr(AML_RECY_ASSOC_INFO_SAVED);
+                }
 #if defined(IEEE80211_MLD_MAX_NUM_LINKS)
                 if ((ind->status_code != 0) && (wdev->connected)) {
 #else
