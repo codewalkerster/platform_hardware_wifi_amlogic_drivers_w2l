@@ -3386,27 +3386,6 @@ aml_cfg80211_remain_on_channel(struct wiphy *wiphy, struct wireless_dev *wdev,
         }
     }
 
-    list_for_each_entry(vif, &aml_hw->vifs, list) {
-        if (!vif->up || vif->ndev == NULL) {
-            continue;
-        }
-
-        if (AML_VIF_TYPE(vif) == NL80211_IFTYPE_STATION ||
-            AML_VIF_TYPE(vif) == NL80211_IFTYPE_P2P_CLIENT) {
-            if (vif->sta.ap && vif->sta.ap->valid) {
-                int count = 0;
-                AML_INFO("vif:%d is getting IP, wait gotten ip\n", vif->vif_index);
-                while (aml_connect_flags_chk(vif, AML_GETTING_IP)) {
-                    msleep(10);
-                    if (count++ > 100) {
-                        AML_INFO("wait getting IP tiimeout, drop ROC event\n");
-                        return -EBUSY;
-                    }
-                }
-            }
-        }
-    }
-
     /* Allocate a temporary RoC element */
     roc = kmalloc(sizeof(struct aml_roc), GFP_KERNEL);
     if (!roc) {

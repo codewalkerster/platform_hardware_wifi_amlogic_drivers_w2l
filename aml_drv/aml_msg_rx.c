@@ -582,6 +582,11 @@ static inline int aml_rx_p2p_noa_upd_ind(struct aml_hw *aml_hw,
                                           struct aml_cmd *cmd,
                                           struct ipc_e2a_msg *msg)
 {
+    struct mm_p2p_noa_upd_ind *ind = (struct mm_p2p_noa_upd_ind *)msg->param;
+
+    AML_INFO("nb:%d, type:%d, count:%d, dur_us:%u, intv_us:%u, start_t:%u",
+        ind->noa_inst_nb, ind->noa_type, ind->count, ind->duration_us, ind->interval_us, ind->start_time);
+
     return 0;
 }
 

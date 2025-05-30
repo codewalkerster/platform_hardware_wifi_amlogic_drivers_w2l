@@ -1413,7 +1413,7 @@ uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E 
                             if ((oui_subtype == P2P_ACTION_GO_NEG_REQ) || (oui_subtype == P2P_ACTION_INVIT_REQ))
                                 AML_SCC_SET_P2P_PEER_5G_SUPPORT(false); //rest 5g support flag
 
-                            if ((oui_subtype == P2P_ACTION_GO_NEG_REQ) || (oui_subtype == P2P_ACTION_GO_NEG_RSP) || (oui_subtype == P2P_ACTION_INVIT_REQ) || (oui_subtype == P2P_ACTION_INVIT_RSP)) {
+                            if ((oui_subtype == P2P_ACTION_GO_NEG_REQ) || (oui_subtype == P2P_ACTION_GO_NEG_RSP) || (oui_subtype == P2P_ACTION_INVIT_REQ)) {
                                 struct aml_vif *sta_vif ;
                                 sta_vif = vif->aml_hw->vif_table[0];
                                 if (sta_vif && sta_vif->sta.ap && (sta_vif->sta.ap->valid)) {
