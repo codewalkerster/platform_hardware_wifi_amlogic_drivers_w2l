@@ -36,7 +36,7 @@ CONFIG_AML_LOG_BUILD_LEVEL ?= LOGLEVEL_DEBUG
 
 #Enable LA (for non-PCIE platform only)
 #should make PROJ=SDIO VER=LA for firmware also
-CONFIG_AML_LA ?= n
+CONFIG_AML_LA ?= y
 
 #usb large page
 CONFIG_AML_USB_LARGE_PAGE ?= y
@@ -60,12 +60,17 @@ CONFIG_AML_NAN_SUPPORT ?= n
 #
 # FIXME: remove CONFIG_AML_SDIO_USB_FW_REORDER and related code in the future
 #
-CONFIG_AML_SDIO_USB_FW_REORDER ?= y
+CONFIG_AML_SDIO_USB_FW_REORDER ?= n
 
+#Enable APF (Android Packet Filter)
+ifeq ($(CONFIG_AML_ANDROID),16)
+CONFIG_AML_APF ?= y
+endif
 obj-m := w2l.o
 w2l-y := ../aml_msg_tx.o        \
         ../aml_msg_rx.o        \
         ../aml_reorder.o       \
+        ../aml_sdio_usb_rx.o   \
         ../aml_utils.o         \
         ../aml_cmds.o          \
         ../aml_irqs.o          \
@@ -86,6 +91,7 @@ w2l-y := ../aml_msg_tx.o        \
         ../aml_regdom.o        \
         ../aml_android.o       \
         ../aml_iwpriv_cmds.o   \
+        ../aml_rate.o          \
         ../aml_p2p.o           \
         ../aml_scc.o           \
         ../aml_wq.o            \
@@ -96,7 +102,9 @@ w2l-y := ../aml_msg_tx.o        \
         ../aml_sap.o           \
         ../aml_csi.o           \
         ../aml_mdns_offload.o  \
-        ../aml_roku_custom.o
+        ../aml_roku_custom.o   \
+        ../aml_cfgvendor.o     \
+        ../aml_fw_trace.o
 
 obj-m += w2l_comm.o
 w2l_comm-objs := \
@@ -112,10 +120,20 @@ w2l_comm-objs += ../aml_bus/sdio_common.o
 w2l_comm-objs += ../aml_bus/w2_sdio.o
 endif
 
+ifneq ($(ROKU_TV_PROJECT),)
+obj-m += aml_bt.o
+aml_bt-objs := \
+        ../bt/roku_usb_bt_driver/amlbt.o \
+        ../bt/roku_usb_bt_driver/common.o \
+        ../bt/roku_usb_bt_driver/debug_dev.o \
+        ../bt/roku_usb_bt_driver/w1u_usb_bt.o\
+        ../bt/roku_usb_bt_driver/rc_list.o \
+        ../bt/roku_usb_bt_driver/w2l_usb_bt.o
+endif
+
 w2l-$(CONFIG_AML_RADAR)        += ../aml_radar.o
 w2l-$(CONFIG_DEBUG_FS)         += ../aml_debugfs.o
 w2l-$(CONFIG_DEBUG_FS)         += ../aml_fw_dump.o
-w2l-$(CONFIG_DEBUG_FS)         += ../aml_fw_trace.o
 w2l-$(CONFIG_NL80211_TESTMODE) += ../aml_testmode.o
 w2l-$(CONFIG_AML_BFMER)        += ../aml_bfmer.o
 w2l-$(CONFIG_AML_MUMIMO_TX)    += ../aml_mu_group.o
@@ -131,9 +149,14 @@ ccflags-y += -I$(src)
 ccflags-y += -I$(src)/..
 ccflags-y += -I$(src)/../aml_bus
 ccflags-y += -I$(src)/../../common
+ifeq ($(CUSTOM_LOG_PREFIX), n)
 ifneq ($(CONFIG_AML_PRODUCT),)
 ccflags-y += -DCONFIG_AML_LOG_PREFIX=\"[$(CONFIG_AML_PRODUCT)]\"
 endif
+else
+ccflags-y += -DCONFIG_AML_LOG_PREFIX=\"[$(CUSTOM_LOG_PREFIX)]\"
+endif
+
 ccflags-$(CONFIG_AML_RADAR) += -DCONFIG_AML_RADAR
 ccflags-$(CONFIG_AML_MON_DATA) += -DCONFIG_AML_MON_DATA
 ccflags-$(CONFIG_AML_BFMER) += -DCONFIG_AML_BFMER
@@ -150,6 +173,7 @@ ccflags-$(CONFIG_AML_LA) += -DCONFIG_AML_LA
 ccflags-$(CONFIG_AML_USB_LARGE_PAGE) += -DCONFIG_AML_USB_LARGE_PAGE
 ccflags-$(CONFIG_AML_NAN_SUPPORT) += -DCONFIG_AML_NAN_SUPPORT
 ccflags-$(CONFIG_AML_SDIO_USB_FW_REORDER) += -DCONFIG_AML_SDIO_USB_FW_REORDER
+ccflags-$(CONFIG_AML_APF) += -DCONFIG_AML_APF
 
 ifeq ($(CONFIG_AML_MUMIMO_TX), y)
 ccflags-y += -DCONFIG_USER_MAX=2
@@ -182,10 +206,20 @@ ccflags-y += -DDRV_P2P_SCC_MODE
 #hostapd cannot handle sta+softap scc mode,so do sta_softap scc in fw&drv
 ccflags-y += -DSCC_STA_SOFTAP
 
-#for credit 124
-#ccflags-y += -DCONFIG_CREDIT124
-# 4.9 compile
-ccflags-y += -w
+# FIXME: remove the following lines, treat any warning as error
+ifeq ($(shell test $(VERSION) -eq 6; echo $$?),0)
+ccflags-y += -Wno-error
+endif
+
+# kernel-4.9 compile
+ifeq ($(shell test $(VERSION) -eq 4; echo $$?),0)
+ccflags-y += -Wno-error=array-bounds
+endif
+
+ifeq ($(CONFIG_PT_MODE),y)
+# FIXME: relax PT build for now
+ccflags-y += -Wno-error
+endif
 
 # For old kernel (<=3.19)
 ifeq ($(shell test $(VERSION) -lt 4 -a "$(CONFIG_VENDOR_AML)" = y ; echo $$?),0)
@@ -197,6 +231,7 @@ quiet_cmd_genvers = GENVERSION $@
       cmd_genvers = ($(build_dir)/mkvers.sh $(build_dir)/aml_version_gen.h $@)
 
 $(obj)/aml_main.o: $(obj)/aml_version_gen.h
+
 # To avoid always regenerating aml_version_gen.h (i.e. depend on FORCE), add
 # dependency on all object (which already include dependency on headers files).
 # Still Cannot add dependency on aml_main.o otherwise this will create circular

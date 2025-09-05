@@ -36,7 +36,9 @@
 /* Offset of OUI Subtype field in Vendor Public Action Frame format */
 #define MGMT_ACTION_OUI_SUBTYPE_OFFSET (5)
 
-const char *ftrace_print_mgmt_info(struct trace_seq *p, u16 frame_control, u8 cat, u8 type, u8 vendor) {
+static inline const char *
+ftrace_print_mgmt_info(struct trace_seq *p, u16 frame_control, u8 cat, u8 type, u8 vendor)
+{
     const char *ret = trace_seq_buffer_ptr(p);
 
     switch (frame_control & IEEE80211_FCTL_STYPE) {
@@ -112,6 +114,7 @@ const char *ftrace_print_mgmt_info(struct trace_seq *p, u16 frame_control, u8 ca
 #define __print_mgmt_info(frame_control, cat, type, p2p) ftrace_print_mgmt_info(p, frame_control, cat, type, p2p)
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     roc,
     TP_PROTO(u8 vif_idx, u16 freq, unsigned int duration),
@@ -131,6 +134,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     cancel_roc,
     TP_PROTO(u8 vif_idx),
@@ -145,6 +149,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     roc_exp,
     TP_PROTO(u8 vif_idx),
@@ -159,6 +164,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     switch_roc,
     TP_PROTO(u8 vif_idx),
@@ -211,15 +217,18 @@ DECLARE_EVENT_CLASS(
                                 __entry->action_type, __entry->action_vendor))
 );
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(mgmt_template, mgmt_tx,
              TP_PROTO(u16 freq, u8 vif_idx, u8 sta_idx, struct ieee80211_mgmt *mgmt),
              TP_ARGS(freq, vif_idx, sta_idx, mgmt));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(mgmt_template, mgmt_rx,
              TP_PROTO(u16 freq, u8 vif_idx, u8 sta_idx, struct ieee80211_mgmt *mgmt),
              TP_ARGS(freq, vif_idx, sta_idx, mgmt));
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     mgmt_cfm,
     TP_PROTO(u8 vif_idx, u8 sta_idx, bool acked),
@@ -252,7 +261,7 @@ TRACE_EVENT(
 #include <linux/ftrace_event.h>
 #endif
 
-const char *
+static inline const char *
 ftrace_print_txq(struct trace_seq *p, int txq_idx) {
     const char *ret = trace_seq_buffer_ptr(p);
 
@@ -287,7 +296,7 @@ ftrace_print_txq(struct trace_seq *p, int txq_idx) {
     return ret;
 }
 
-const char *
+static inline const char *
 ftrace_print_sta(struct trace_seq *p, int sta_idx) {
     const char *ret = trace_seq_buffer_ptr(p);
 
@@ -302,7 +311,7 @@ ftrace_print_sta(struct trace_seq *p, int sta_idx) {
     return ret;
 }
 
-const char *
+static inline const char *
 ftrace_print_hwq(struct trace_seq *p, int hwq_idx) {
 
     static const struct trace_print_flags symbols[] =
@@ -319,7 +328,7 @@ ftrace_print_hwq(struct trace_seq *p, int hwq_idx) {
     return trace_print_symbols_seq(p, hwq_idx, symbols);
 }
 
-const char *
+static inline const char *
 ftrace_print_hwq_cred(struct trace_seq *p, u8 *cred) {
     const char *ret = trace_seq_buffer_ptr(p);
 
@@ -337,7 +346,7 @@ ftrace_print_hwq_cred(struct trace_seq *p, u8 *cred) {
     return ret;
 }
 
-const char *
+static inline const char *
 ftrace_print_mu_info(struct trace_seq *p, u8 mu_info) {
     const char *ret = trace_seq_buffer_ptr(p);
 
@@ -348,7 +357,7 @@ ftrace_print_mu_info(struct trace_seq *p, u8 mu_info) {
     return ret;
 }
 
-const char *
+static inline const char *
 ftrace_print_mu_group(struct trace_seq *p, int nb_user, u8 *users) {
     const char *ret = trace_seq_buffer_ptr(p);
 #if CONFIG_USER_MAX > 1
@@ -372,7 +381,7 @@ ftrace_print_mu_group(struct trace_seq *p, int nb_user, u8 *users) {
     return ret;
 }
 
-const char *
+static inline const char *
 ftrace_print_amsdu(struct trace_seq *p, u16 nb_pkt) {
     const char *ret = trace_seq_buffer_ptr(p);
 
@@ -383,7 +392,7 @@ ftrace_print_amsdu(struct trace_seq *p, u16 nb_pkt) {
     return ret;
 }
 
-const char *
+static inline const char *
 ftrace_print_sn(struct trace_seq *p, u16 sn) {
     const char *ret = trace_seq_buffer_ptr(p);
 
@@ -473,6 +482,7 @@ ftrace_print_mac80211_flag(struct trace_seq *p, u32 flags) {
 #ifdef CONFIG_AML_FULLMAC
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     txq_select,
     TP_PROTO(int txq_idx, u16 pkt_ready_up, struct sk_buff *skb),
@@ -507,10 +517,12 @@ DECLARE_EVENT_CLASS(
     TP_printk("%s", __print_hwq(__entry->hwq_idx))
 );
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(hwq_template, hwq_flowctrl_stop,
              TP_PROTO(u8 hwq_idx),
              TP_ARGS(hwq_idx));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(hwq_template, hwq_flowctrl_start,
              TP_PROTO(u8 hwq_idx),
              TP_ARGS(hwq_idx));
@@ -530,20 +542,24 @@ DECLARE_EVENT_CLASS(
     TP_printk("%s", __print_txq(__entry->txq_idx))
 );
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(txq_template, txq_add_to_hw,
              TP_PROTO(struct aml_txq *txq),
              TP_ARGS(txq));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(txq_template, txq_del_from_hw,
              TP_PROTO(struct aml_txq *txq),
              TP_ARGS(txq));
 
 #ifdef CONFIG_AML_FULLMAC
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(txq_template, txq_flowctrl_stop,
              TP_PROTO(struct aml_txq *txq),
              TP_ARGS(txq));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(txq_template, txq_flowctrl_restart,
              TP_PROTO(struct aml_txq *txq),
              TP_ARGS(txq));
@@ -551,6 +567,7 @@ DEFINE_EVENT(txq_template, txq_flowctrl_restart,
 #endif  /* CONFIG_AML_FULLMAC */
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     process_txq,
     TP_PROTO(struct aml_txq *txq),
@@ -623,10 +640,12 @@ DECLARE_EVENT_CLASS(
                             {AML_TXQ_NDEV_FLOW_CTRL, "FLW_CTRL"}))
 );
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(txq_reason_template, txq_start,
              TP_PROTO(struct aml_txq *txq, u16 reason),
              TP_ARGS(txq, reason));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(txq_reason_template, txq_stop,
              TP_PROTO(struct aml_txq *txq, u16 reason),
              TP_ARGS(txq, reason));
@@ -652,6 +671,7 @@ TRACE_EVENT(
 #endif /* CONFIG_AML_SOFTMAC */
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     push_desc,
     TP_PROTO(struct sk_buff *skb, struct aml_sw_txhdr *sw_txhdr, int push_flags),
@@ -745,6 +765,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     txq_queue_skb,
     TP_PROTO(struct sk_buff *skb, struct aml_txq *txq, bool retry),
@@ -772,6 +793,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     txq_drop_skb,
     TP_PROTO(struct sk_buff *skb, struct aml_txq *txq, unsigned long queued_time),
@@ -849,16 +871,18 @@ DECLARE_EVENT_CLASS(
     TP_printk("idx=%d", __entry->idx)
 );
 
-
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(idx_template, txq_vif_start,
              TP_PROTO(u16 idx),
              TP_ARGS(idx));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(idx_template, txq_vif_stop,
              TP_PROTO(u16 idx),
              TP_ARGS(idx));
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     process_hw_queue,
     TP_PROTO(struct aml_hwq *hwq),
@@ -891,16 +915,18 @@ DECLARE_EVENT_CLASS(
     TP_printk("%s", __print_sta(__entry->idx))
 );
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(sta_idx_template, txq_sta_start,
              TP_PROTO(u16 idx),
              TP_ARGS(idx));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(sta_idx_template, txq_sta_stop,
              TP_PROTO(u16 idx),
              TP_ARGS(idx));
 
 #ifdef CONFIG_AML_FULLMAC
-
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(sta_idx_template, ps_disable,
              TP_PROTO(u16 idx),
              TP_ARGS(idx));
@@ -917,6 +943,7 @@ DEFINE_EVENT(sta_idx_template, ps_disable,
 #endif  /* CONFIG_AML_FULLMAC */
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     skb_confirm,
     TP_PROTO(struct sk_buff *skb, struct aml_txq *txq, struct aml_hwq *hwq,
@@ -998,6 +1025,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     skb_retry,
     TP_PROTO(struct sk_buff *skb, struct aml_txq *txq, uint16_t sn),
@@ -1024,6 +1052,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     credit_update,
     TP_PROTO(struct aml_txq *txq, s8_l cred_up),
@@ -1074,23 +1103,28 @@ DECLARE_EVENT_CLASS(
               __entry->ready_uapsd, __entry->sp_uapsd)
 );
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(ps_template, ps_queue,
              TP_PROTO(struct aml_sta *sta),
              TP_ARGS(sta));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(ps_template, ps_drop,
              TP_PROTO(struct aml_sta *sta),
              TP_ARGS(sta));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(ps_template, ps_push,
              TP_PROTO(struct aml_sta *sta),
              TP_ARGS(sta));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(ps_template, ps_enable,
              TP_PROTO(struct aml_sta *sta),
              TP_ARGS(sta));
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     ps_traffic_update,
     TP_PROTO(u16 sta_idx, u8 traffic, bool uapsd),
@@ -1115,6 +1149,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     ps_traffic_req,
     TP_PROTO(struct aml_sta *sta, u16 pkt_req, u8 ps_id),
@@ -1143,6 +1178,7 @@ TRACE_EVENT(
 
 #ifdef CONFIG_AML_AMSDUS_TX
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     amsdu_subframe,
     TP_PROTO(struct aml_sw_txhdr *sw_txhdr),
@@ -1167,6 +1203,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     amsdu_dismantle,
     TP_PROTO(struct aml_sw_txhdr *sw_txhdr),
@@ -1190,6 +1227,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     amsdu_len_update,
     TP_PROTO(struct aml_sta *sta, int amsdu_len),
@@ -1325,14 +1363,17 @@ DECLARE_EVENT_CLASS(
               __entry->idx, __entry->tgt_mac, __entry->next_hop_sta)
 );
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(mesh_path_template, mesh_create_path,
              TP_PROTO(struct aml_mesh_path *mesh_path),
              TP_ARGS(mesh_path));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(mesh_path_template, mesh_delete_path,
              TP_PROTO(struct aml_mesh_path *mesh_path),
              TP_ARGS(mesh_path));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(mesh_path_template, mesh_update_path,
              TP_PROTO(struct aml_mesh_path *mesh_path),
              TP_ARGS(mesh_path));
@@ -1345,6 +1386,7 @@ DEFINE_EVENT(mesh_path_template, mesh_update_path,
 #ifdef CONFIG_AML_RADAR
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     radar_pulse,
     TP_PROTO(u8 chain, struct radar_pulse *pulse),
@@ -1372,6 +1414,7 @@ TRACE_EVENT(
             );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     radar_detected,
     TP_PROTO(u8 chain, u8 region, s16 freq, u8 type, u16 pri),
@@ -1403,6 +1446,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     radar_set_region,
     TP_PROTO(u8 region),
@@ -1422,6 +1466,7 @@ TRACE_EVENT(
 );
 
 /* coverity[uninit_use_in_call] - __regs will be initialized in the calling function*/
+/* coverity[overrun-local] --ignore */
 TRACE_EVENT(
     radar_enable_detection,
     TP_PROTO(u8 region, u8 enable, u8 chain),
@@ -1474,10 +1519,12 @@ DECLARE_EVENT_CLASS(
               MSG_T(__entry->id), MSG_I(__entry->id))
 );
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(ipc_msg_template, msg_send,
              TP_PROTO(u16 id),
              TP_ARGS(id));
 
+/* coverity[overrun-local] --ignore */
 DEFINE_EVENT(ipc_msg_template, msg_recv,
              TP_PROTO(u16 id),
              TP_ARGS(id));

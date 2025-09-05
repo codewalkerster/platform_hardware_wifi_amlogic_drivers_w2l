@@ -1,3 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
 #ifndef __WIFI_SDIO_CFG_ADDR_H__
 #define __WIFI_SDIO_CFG_ADDR_H__
 
@@ -15,8 +22,6 @@
 #define RG_SCFG_FUNC5_BADDR_A (0x8150)
 #define RG_SCFG_FUNC6_BADDR_A (0x8160)
 #define RG_SCFG_FUNC7_BADDR_A (0x8170)
-
-#define RG_SCFG_FUNC1_AUTO_TX  (0x8181)
 
 /* select reset sdio keep sdio slave in selected state*/
 #define RG_SCFG_SELECT_RST (0x9000)

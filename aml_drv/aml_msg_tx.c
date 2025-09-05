@@ -23,16 +23,17 @@
 #include "aml_scc.h"
 #include "aml_recy.h"
 #include "aml_wq.h"
+#include "aml_irqs.h"
 #include "aml_sap.h"
 #include "chip_intf_reg.h"
 #include "aml_compat.h"
 #ifdef CONFIG_AML_NAN_SUPPORT
 #include "aml_nan.h"
 #endif
-#include "aml_irqs.h"
-#include "aml_main.h"
 #include "aml_p2p.h"
-
+#include "aml_mdns_offload.h"
+#include "aml_main.h"
+#include "aml_regdom.h"
 
 const struct mac_addr mac_addr_bcst = {{0xFFFF, 0xFFFF, 0xFFFF}};
 extern struct aml_pm_type g_wifi_pm;
@@ -118,8 +119,13 @@ static inline bool use_pairwise_key(struct cfg80211_crypto_settings *crypto)
     return true;
 }
 
-static inline bool is_non_blocking_msg(int id)
+static inline bool is_non_blocking_msg(lmac_msg_id_t const id, lmac_msg_id_t const sub_id)
 {
+    if ((id == MM_OTHER_REQ)) {
+        if ((sub_id == MM_SUB_SHUTDOWN) || (sub_id == MM_SUB_SDIO_REC_DETECT) || (sub_id == MM_SUB_FW_RESET))
+            return  true;
+    }
+
     return ((id == MM_TIM_UPDATE_REQ) || (id == ME_RC_SET_RATE_REQ) ||
             (id == MM_BFMER_ENABLE_REQ) || (id == ME_TRAFFIC_IND_REQ) ||
             (id == TDLS_PEER_TRAFFIC_IND_REQ) ||
@@ -136,7 +142,7 @@ bool aml_msg_send_mtheod(int id)
 
 #ifdef CONFIG_AML_FULLMAC
 /**
- * copy_connect_ies -- Copy Association Elements in the the request buffer
+ * copy_connect_ies -- Copy Association Elements in the request buffer
  * send to the firmware
  *
  * @vif: Vif that received the connection request
@@ -336,7 +342,7 @@ static inline void *aml_msg_zalloc(lmac_msg_id_t const id,
     gfp_t flags;
     uint16_t payl_len = param_len;
 
-    if (is_non_blocking_msg(id) && in_softirq())
+    if (is_non_blocking_msg(id, 0) && in_softirq())
         flags = GFP_ATOMIC;
     else
         flags = GFP_KERNEL;
@@ -365,6 +371,46 @@ static inline void *aml_msg_zalloc(lmac_msg_id_t const id,
     return msg->param;
 }
 
+static inline void *aml_other_msg_zalloc(lmac_msg_id_t const id,
+                                    lmac_msg_id_t const sub_id,
+                                    lmac_task_id_t const dest_id,
+                                    lmac_task_id_t const src_id,
+                                    uint16_t const param_len)
+{
+    struct lmac_msg *msg;
+    gfp_t flags;
+    uint16_t payl_len = param_len;
+
+    if (is_non_blocking_msg(id, sub_id) && in_softirq())
+        flags = GFP_ATOMIC;
+    else
+        flags = GFP_KERNEL;
+
+    if (aml_bus_type != PCIE_MODE) {
+        if (id == ME_TRAFFIC_IND_REQ) {
+            flags = GFP_ATOMIC;
+        }
+    }
+
+    //make param_len ALIGN4 HI
+    payl_len = (((payl_len)+3)&~3);
+    msg = (struct lmac_msg *)kzalloc(sizeof(struct lmac_msg) + payl_len,
+                                     flags);
+    if (msg == NULL) {
+        AML_ERR("msg allocation failed\n");
+        return NULL;
+    }
+
+    msg->id = id;
+    msg->dest_id = dest_id;
+    msg->src_id = src_id;
+    msg->param_len = payl_len;
+
+    /* coverity[leaked_storage] - msg will free in @aml_send_msg or in  @cmd_complete*/
+    return msg->param;
+}
+
+
 /**
  ******************************************************************************
  * @brief Allocate memory for a sub message
@@ -379,7 +425,7 @@ static inline void *aml_msg_zalloc(lmac_msg_id_t const id,
 static void *aml_priv_msg_zalloc(lmac_msg_id_t const id,
                                         uint16_t const param_len)
 {
-    struct mm_other_cmd *mm_sub_cmd = (struct mm_other_cmd *)aml_msg_zalloc(MM_OTHER_REQ, TASK_MM, DRV_TASK_ID,
+    struct mm_other_cmd *mm_sub_cmd = (struct mm_other_cmd *)aml_other_msg_zalloc(MM_OTHER_REQ, id, TASK_MM, DRV_TASK_ID,
                                                          sizeof(struct mm_other_cmd) + param_len);
     if (!mm_sub_cmd)
         return NULL;
@@ -410,6 +456,44 @@ static void aml_priv_msg_free(struct aml_hw *aml_hw, const void *msg_params)
 
     aml_msg_free(aml_hw, msg);
 }
+
+bool aml_check_suspend_resume_msg(struct aml_hw *aml_hw, struct lmac_msg *msg)
+{
+    if ((aml_hw->state !=  WIFI_SUSPEND_STATE_NONE) && (msg->param_len != 0))
+    {
+        if (msg->id == MM_OTHER_REQ)
+        {
+            if ((*(msg->param) == MM_SUB_SET_SUSPEND_REQ)
+                || (*(msg->param) == MM_SUB_SCANU_CANCEL_REQ)
+                || (*(msg->param) == MM_SUB_ARP_AGENT_REQ)
+                || (*(msg->param) == MM_SUB_TKO_ACTIVATE_REQ)
+                || (*(msg->param) == MM_SUB_DHCP_REQ)
+                || (*(msg->param) == MM_SUB_SET_DYNAMIC_BUF_STATE)
+                || (*(msg->param) == ME_SET_PS_MODE_REQ)
+                || (*(msg->param) == MM_SCAN_HANG))
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        else if (msg->id == ME_SET_PS_MODE_REQ)
+        {
+            return true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    else
+    {
+        return true;
+    }
+}
+
 extern struct aml_bus_state_detect bus_state_detect;
 static int aml_send_msg(struct aml_hw *aml_hw, const void *msg_params,
                          int reqcfm, lmac_msg_id_t reqid, void *cfm)
@@ -418,26 +502,35 @@ static int aml_send_msg(struct aml_hw *aml_hw, const void *msg_params,
     struct aml_cmd *cmd;
     bool nonblock;
     bool call_thread;
-    int ret;
-
-    AML_DBG(AML_FN_ENTRY_STR);
+    int ret = 0;
+    lmac_msg_id_t sub_id = 0xffff;
+    bool is_suspend_resume_msg;
 
     msg = container_of((void *)msg_params, struct lmac_msg, param);
+    if ((msg->param_len != 0) && (msg->id == MM_OTHER_REQ))
+        sub_id = *(msg->param);
+
 #ifdef CONFIG_AML_RECOVERY
+    if ((aml_bus_type == USB_MODE) && aml_recy_flags_chk(AML_RECY_USB_UNPLUG)) {
+        AML_INFO("usb_unplug, cmd not allow to send, id:%d\n", msg->id);
+        kfree(msg);
+        return -EBUSY;
+    }
+
     if ((aml_bus_type != PCIE_MODE) && (bus_state_detect.bus_err)) {
         kfree(msg);
         return 0;
     }
 #endif
-    if ((aml_hw->state > WIFI_SUSPEND_STATE_NONE || g_pci_msg_suspend)
-        && ((msg->param_len != 0) && (*(msg->param) != MM_SUB_SET_SUSPEND_REQ))
-        && ((msg->param_len != 0) && (*(msg->param) != MM_SUB_SCANU_CANCEL_REQ && (*(msg->param) != MM_SUB_SHUTDOWN)))
+    //msg allow send when state=wow
+    is_suspend_resume_msg = aml_check_suspend_resume_msg(aml_hw, msg);
+
+    if (((g_pci_msg_suspend) || (!is_suspend_resume_msg)) && ((msg->param_len != 0) && (sub_id != MM_SUB_SHUTDOWN))
 #ifdef CONFIG_AML_RECOVERY
         && (!aml_recy_flags_chk(AML_RECY_STATE_ONGOING))
 #endif
-
     ) {
-        AML_INFO("driver in suspend, cmd not allow to send, id:%d,aml_hw->state:%d g_pci_msg_suspend:%d\n",
+        AML_ERR("driver in suspend, cmd not allow to send, id:%d,aml_hw->state:%d g_pci_msg_suspend:%d\n",
             msg->id, aml_hw->state, g_pci_msg_suspend);
         kfree(msg);
         return -EBUSY;
@@ -455,7 +548,7 @@ static int aml_send_msg(struct aml_hw *aml_hw, const void *msg_params,
         reqid != MM_RESET_CFM && reqid != MM_VERSION_CFM &&
         reqid != MM_START_CFM && reqid != MM_SET_IDLE_CFM &&
         reqid != MM_MSG_BYPASS_ID &&
-        reqid != ME_CONFIG_CFM && reqid != MM_SET_PS_MODE_CFM &&
+        reqid != ME_CONFIG_CFM && reqid != ME_SET_PS_MODE_CFM &&
         reqid != ME_CHAN_CONFIG_CFM && reqid != PRIV_EFUSE_READ_RESULT) {
         AML_ERR(" bypassing (AML_DEV_RESTARTING set) 0x%02x\n", reqid);
         kfree(msg);
@@ -466,11 +559,7 @@ static int aml_send_msg(struct aml_hw *aml_hw, const void *msg_params,
         return -EBUSY;
     }
 
-    nonblock = is_non_blocking_msg(msg->id);
-    if ((msg->param_len != 0) && (*(msg->param) == MM_SUB_SHUTDOWN) && (msg->id == MM_OTHER_REQ)) {
-        nonblock = true;
-    }
-
+    nonblock = is_non_blocking_msg(msg->id, sub_id);
     call_thread = aml_msg_send_mtheod(msg->id);
 
     cmd = kzalloc(sizeof(struct aml_cmd), nonblock ? GFP_ATOMIC : GFP_KERNEL);
@@ -494,20 +583,22 @@ static int aml_send_msg(struct aml_hw *aml_hw, const void *msg_params,
         cmd->flags |= AML_CMD_FLAG_REQ_CFM;
     if (call_thread)
         cmd->flags |= AML_CMD_FLAG_CALL_THREAD;
-    ret = aml_hw->cmd_mgr.queue(&aml_hw->cmd_mgr, cmd);
+    if (aml_hw->cmd_mgr.queue)
+        ret = aml_hw->cmd_mgr.queue(&aml_hw->cmd_mgr, cmd);
+    else
+        AML_INFO("====> aml_hw->cmd_mgr.queue null\n");
 
     if (!ret) {
         if (nonblock) {
             ret = 0;
         } else {
-            ret = cmd->result;
+            ret = (int)cmd->result;
         }
     }
 
     if (!nonblock) {
         if (cmd) {
             kfree(cmd);
-            cmd = NULL;
         }
     }
 
@@ -526,8 +617,8 @@ static int aml_send_msg(struct aml_hw *aml_hw, const void *msg_params,
  * @return status
  ******************************************************************************
  */
-int aml_priv_send_msg(struct aml_hw *aml_hw, const void *msg_params,
-                         int reqcfm, lmac_msg_id_t reqid, void *cfm)
+static int aml_priv_send_msg(struct aml_hw *aml_hw, const void *msg_params,
+                             int reqcfm, lmac_msg_id_t reqid, void *cfm)
 {
     void *msg;
 
@@ -623,7 +714,7 @@ int aml_send_add_if(struct aml_hw *aml_hw, const unsigned char *mac,
     #ifdef CONFIG_AML_FULLMAC
     case NL80211_IFTYPE_P2P_CLIENT:
         add_if_req_param->p2p = true;
-        // no break
+        fallthrough;
     #endif /* CONFIG_AML_FULLMAC */
     case NL80211_IFTYPE_STATION:
         add_if_req_param->type = MM_STA;
@@ -636,7 +727,7 @@ int aml_send_add_if(struct aml_hw *aml_hw, const unsigned char *mac,
     #ifdef CONFIG_AML_FULLMAC
     case NL80211_IFTYPE_P2P_GO:
         add_if_req_param->p2p = true;
-        // no break
+        fallthrough;
     #endif /* CONFIG_AML_FULLMAC */
     case NL80211_IFTYPE_AP:
         add_if_req_param->type = MM_AP;
@@ -666,11 +757,11 @@ int aml_send_add_if(struct aml_hw *aml_hw, const unsigned char *mac,
     #endif /* CONFIG_AML_SOFTMAC */
 
     /* Send the ADD_IF_REQ message to LMAC FW */
-    /* coverity[leaked_storage] - add_if_req_param will be freed later */
     if ((aml_hw->wfd_present) && add_if_req_param->p2p) {
         AML_INFO("wfd is present");
         add_if_req_param->type |= BIT(7);
     }
+    /* coverity[leaked_storage] - add_if_req_param will be freed later */
     return aml_send_msg(aml_hw, add_if_req_param, 1, MM_ADD_IF_CFM, cfm);
 }
 
@@ -874,7 +965,7 @@ int aml_send_cancel_roc(struct aml_hw *aml_hw)
 
     AML_DBG(AML_FN_ENTRY_STR);
 
-    aml_tx_cfm_wait_rsp(aml_hw, false, __func__, __LINE__);
+    aml_tx_cfm_wait_rsp(aml_hw, false, (u8 *)__func__, __LINE__);
     /* Build the MM_REMAIN_ON_CHANNEL_REQ message */
     req = aml_msg_zalloc(MM_REMAIN_ON_CHANNEL_REQ, TASK_MM, DRV_TASK_ID,
                           sizeof(struct mm_remain_on_channel_req));
@@ -967,7 +1058,6 @@ int aml_send_p2p_noa_req(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
                           struct mm_set_p2p_noa_cfm *cfm)
 {
     struct mm_set_p2p_noa_req *p2p_noa_req;
-    int error;
 
     AML_DBG(AML_FN_ENTRY_STR);
 
@@ -976,7 +1066,7 @@ int aml_send_p2p_noa_req(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
         count = 255;
 
     if (duration >= interval) {
-        dev_err(aml_hw->dev, "Invalid p2p NOA config: interval=%d <= duration=%d\n",
+        AML_ERR("Invalid p2p NOA config: interval=%d <= duration=%d\n",
                 interval, duration);
         return -EINVAL;
     }
@@ -1002,10 +1092,8 @@ int aml_send_p2p_noa_req(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
     }
 
     /* Send the MM_SET_2P_NOA_REQ message to LMAC FW */
-    error = aml_send_msg(aml_hw, p2p_noa_req, 1, MM_SET_P2P_NOA_CFM, cfm);
     /* coverity[leaked_storage] - p2p_noa_req will be freed later */
-
-    return (error);
+    return  aml_send_msg(aml_hw, p2p_noa_req, 1, MM_SET_P2P_NOA_CFM, cfm);
 }
 #endif /* CONFIG_AML_P2P_DEBUGFS */
 
@@ -1617,7 +1705,7 @@ int aml_send_scan_req(struct aml_hw *aml_hw, struct ieee80211_vif *vif,
     if (param->ie) {
         if (aml_ipc_buf_a2e_alloc(aml_hw, &aml_hw->scan_ie,
                                    param->ie_len, param->ie)) {
-            dev_err(aml_hw->dev, "Failed to allocate IPC buffer for Scan IEs\n");
+            AML_ERR("Failed to allocate IPC buffer for Scan IEs\n");
             goto error;
         }
 
@@ -1787,6 +1875,8 @@ int aml_send_me_chan_config_req(struct aml_hw *aml_hw)
 {
     struct me_chan_config_req *req;
     struct wiphy *wiphy = aml_hw->wiphy;
+    unsigned char ofdm_power = 80;
+    unsigned char dsss_power = 80;
     int i;
 
     AML_DBG(AML_FN_ENTRY_STR);
@@ -1807,7 +1897,16 @@ int aml_send_me_chan_config_req(struct aml_hw *aml_hw)
             req->chan2G4[req->chan2G4_cnt].flags |= get_chan_flags(b->channels[i].flags);
             req->chan2G4[req->chan2G4_cnt].band = NL80211_BAND_2GHZ;
             req->chan2G4[req->chan2G4_cnt].freq = b->channels[i].center_freq;
-            req->chan2G4[req->chan2G4_cnt].tx_power = chan_to_fw_pwr(b->channels[i].max_power);
+            if (regdom_en != 1)
+            {
+                req->chan2G4[req->chan2G4_cnt].tx_power = chan_to_fw_pwr(b->channels[i].max_power);
+            } else
+            {
+                aml_regdom_table_pwr_get(aml_ieee80211_freq_to_chan(b->channels[i].center_freq, NL80211_BAND_2GHZ), NL80211_BAND_2GHZ, &ofdm_power, &dsss_power);
+                ofdm_power = ofdm_power & 0x7f;
+                dsss_power = dsss_power & 0x7f;
+                req->chan2G4[req->chan2G4_cnt].tx_power = aml_regdom_set_pwr(chan_to_fw_pwr(b->channels[i].max_power), aml_regdom_set_pwr(dsss_power, ofdm_power));
+            }
             req->chan2G4_cnt++;
             if (req->chan2G4_cnt == MAC_DOMAINCHANNEL_24G_MAX)
                 break;
@@ -1824,7 +1923,17 @@ int aml_send_me_chan_config_req(struct aml_hw *aml_hw)
             req->chan5G[req->chan5G_cnt].flags |= get_chan_flags(b->channels[i].flags);
             req->chan5G[req->chan5G_cnt].band = NL80211_BAND_5GHZ;
             req->chan5G[req->chan5G_cnt].freq = b->channels[i].center_freq;
-            req->chan5G[req->chan5G_cnt].tx_power = chan_to_fw_pwr(b->channels[i].max_power);
+            if (regdom_en != 1) {
+                req->chan5G[req->chan5G_cnt].tx_power = chan_to_fw_pwr(b->channels[i].max_power);
+            }
+            else
+            {
+                aml_regdom_table_pwr_get(aml_ieee80211_freq_to_chan(b->channels[i].center_freq, NL80211_BAND_5GHZ), NL80211_BAND_5GHZ, &ofdm_power, &dsss_power);
+                ofdm_power = ofdm_power & 0x7f;
+                dsss_power = dsss_power & 0x7f;
+                req->chan5G[req->chan5G_cnt].tx_power = aml_regdom_set_pwr(chan_to_fw_pwr(b->channels[i].max_power), aml_regdom_set_pwr(dsss_power, ofdm_power));
+                //req->chan5G[req->chan5G_cnt].tx_power = 80;
+            }
             req->chan5G_cnt++;
             if (req->chan5G_cnt == MAC_DOMAINCHANNEL_5G_MAX)
                 break;
@@ -2039,6 +2148,9 @@ int aml_send_early_beacon_mode(struct aml_hw *aml_hw, struct early_bcn *early_bc
     struct early_bcn * early_bcn;
     early_bcn = aml_priv_msg_zalloc(MM_SUB_SET_EARLY_BEACON_MODE, sizeof(struct early_bcn));
 
+    if (!early_bcn)
+        return -ENOMEM;
+
     early_bcn->early_bcn_mode = early_bcn_set->early_bcn_mode;
     early_bcn->ie_counter = early_bcn_set->ie_counter;
     early_bcn->element_1 = early_bcn_set->element_1;
@@ -2050,6 +2162,7 @@ int aml_send_early_beacon_mode(struct aml_hw *aml_hw, struct early_bcn *early_bc
         early_bcn->element_2 ,early_bcn->element_3, early_bcn->element_4);
 
     /* Send the MM_SUB_SET_EARLY_BEACON_MODE message to LMAC FW */
+    /* coverity[leaked_storage] - early_bcn will be freed later */
     return aml_priv_send_msg(aml_hw, early_bcn, 0, 0, NULL);
 }
 
@@ -2143,10 +2256,16 @@ int aml_send_me_rc_set_rate(struct aml_hw *aml_hw,
     return aml_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
-int aml_send_me_set_ps_mode(struct aml_hw *aml_hw, u8 ps_mode)
+int aml_send_me_set_ps_mode(struct aml_hw *aml_hw, u8 ps_mode, bool is_suspend_resume)
 {
     struct me_set_ps_mode_req *req;
     int ret = 0;
+
+    if ((aml_hw->state == WIFI_SUSPEND_STATE_WOW) && (!is_suspend_resume))
+    {
+        AML_INFO("drv state wow\n");
+        return -ENOMEM;
+    }
 
     AML_INFO("set power save mode:%d", ps_mode);
 
@@ -2160,18 +2279,17 @@ int aml_send_me_set_ps_mode(struct aml_hw *aml_hw, u8 ps_mode)
     req->ps_state = ps_mode;
 
     /* Send the ME_SET_PS_MODE_REQ message to FW */
-    /* coverity[leaked_storage] - req will be freed later */
     ret = aml_send_msg(aml_hw, req, 1, ME_SET_PS_MODE_CFM, NULL);
 #ifdef CONFIG_AML_RECOVERY
     if ((aml_recy != NULL) && !ret) {
         aml_recy->ps_state = ps_mode;
     }
 #endif
-
+    /* coverity[leaked_storage] - req will be freed later */
     return ret;
 }
 
-struct element * aml_get_md_ie(struct aml_vif *vif, struct cfg80211_connect_params *sme)
+static const struct element *aml_get_md_ie(struct aml_vif *vif, struct cfg80211_connect_params *sme)
 {
     if ((sme->auth_type == NL80211_AUTHTYPE_OPEN_SYSTEM) && (vif->sta.ft_assoc_ies)) {
         /*get mdie*/
@@ -2181,7 +2299,7 @@ struct element * aml_get_md_ie(struct aml_vif *vif, struct cfg80211_connect_para
         mde = cfg80211_find_elem(WLAN_EID_MOBILITY_DOMAIN,
                              vif->sta.ft_assoc_ies, vif->sta.ft_assoc_ies_len);
         if ((!mde_req) && (mde)) {
-            printk("add md ie\n");
+            AML_INFO("add md ie\n");
             return mde;
         }
     }
@@ -2302,6 +2420,7 @@ int aml_send_sm_connect_req(struct aml_hw *aml_hw,
 
 invalid_param:
     aml_msg_free(aml_hw, req);
+     /* coverity[leaked_storage] - remove_if_req have already freed */
     return -EINVAL;
 }
 
@@ -2325,7 +2444,6 @@ int aml_send_sm_disconnect_req(struct aml_hw *aml_hw,
     req->vif_idx = aml_vif->vif_index;
 
     /* Send the SM_DISCONNECT_REQ message to LMAC FW */
-    /* coverity[leaked_storage] - req will be freed later */
     ret = aml_send_msg(aml_hw, req, 1, SM_DISCONNECT_CFM, NULL);
 #ifdef CONFIG_AML_RECOVERY
     if ((!ret)  && (!aml_recy_flags_chk(AML_RECY_STATE_ONGOING)) && (aml_recy->reconnect_rest == 0)) {
@@ -2334,6 +2452,7 @@ int aml_send_sm_disconnect_req(struct aml_hw *aml_hw,
        }
     }
 #endif
+    /* coverity[leaked_storage] - req will be freed later */
     return ret;
 }
 
@@ -2380,14 +2499,14 @@ int aml_send_apm_start_req(struct aml_hw *aml_hw, struct aml_vif *vif,
 {
     struct apm_start_req *req;
     struct aml_bcn *bcn = &vif->ap.bcn;
-    struct aml_ipc_buf buf;
+    struct aml_ipc_buf buf = {0};
     u8 *bcn_buf;
     u32 flags = 0;
     const u8 *rate_ie;
     const u8 *ht_cap_ie;
     u8 rate_len = 0;
     int var_offset = offsetof(struct ieee80211_mgmt, u.beacon.variable);
-    const u8 *var_pos;
+    u8 *var_pos;
     int len, i, error;
     unsigned int addr;
     enum nl80211_band band;
@@ -2454,7 +2573,7 @@ int aml_send_apm_start_req(struct aml_hw *aml_hw, struct aml_vif *vif,
 
     ht_cap_ie = cfg80211_find_ie(WLAN_EID_HT_CAPABILITY, var_pos, len);
     if (ht_cap_ie) {
-        struct ieee80211_ht_cap *ht_cap = ht_cap_ie + 2;
+        struct ieee80211_ht_cap *ht_cap = (struct ieee80211_ht_cap *)(ht_cap_ie + 2);
         ht_cap->cap_info &= ~(IEEE80211_HT_CAP_SGI_20 | IEEE80211_HT_CAP_SGI_40);
         ht_cap->cap_info |= aml_hw->mod_params->sgi ? IEEE80211_HT_CAP_SGI_20 : 0;
         ht_cap->cap_info |= aml_hw->mod_params->use_2040 ? IEEE80211_HT_CAP_SGI_40 : 0;
@@ -2489,7 +2608,7 @@ int aml_send_apm_start_req(struct aml_hw *aml_hw, struct aml_vif *vif,
 
     /* Set parameters for the APM_START_REQ message */
     req->vif_idx = vif->vif_index;
-    req->bcn_addr = buf.dma_addr;
+    req->bcn_addr = (u32_l)buf.dma_addr;
     req->bcn_len = bcn->len;
     req->tim_oft = bcn->head_len;
     req->tim_len = bcn->tim_len;
@@ -2572,7 +2691,8 @@ int aml_send_scanu_req(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
     struct scanu_start_req *req;
     int i;
     uint8_t chan_flags = 0;
-
+    unsigned char dsss_power;
+    unsigned char ofdm_power;
     AML_INFO("vif:%d", aml_vif->vif_index);
 
     /* Build the SCANU_START_REQ message */
@@ -2628,7 +2748,7 @@ int aml_send_scanu_req(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
             aml_hw->plat->hif_sdio_ops->hi_random_ram_write((unsigned char *)param->ie, (unsigned char *)SCANU_ADD_IE, param->ie_len);
         }
 #endif
-        if ((aml_vif->vif_index == AML_P2P_DEVICE_VIF_IDX)) {
+        if (aml_vif->vif_index == AML_P2P_DEVICE_VIF_IDX) {
             u8 *ies = (u8 *)param->ie;
             u8 direct_ie[] = "DIRECT-";
 
@@ -2652,7 +2772,27 @@ int aml_send_scanu_req(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
         req->chan[i].band = chan->band;
         req->chan[i].freq = chan->center_freq;
         req->chan[i].flags = chan_flags | get_chan_flags(chan->flags);
-        req->chan[i].tx_power = chan_to_fw_pwr(chan->max_reg_power);
+        //used for scan country limit setting
+        if (regdom_en != 1)
+        {
+            req->chan[i].tx_power = chan_to_fw_pwr(chan->max_reg_power);
+        }
+        else
+        {
+            aml_regdom_table_pwr_get(aml_ieee80211_freq_to_chan(req->chan[i].freq, req->chan[i].band), req->chan[i].band, &ofdm_power, &dsss_power);
+            ofdm_power = ofdm_power & 0x7f;
+            dsss_power = dsss_power & 0x7f;
+
+            if (req->chan[i].band == NL80211_BAND_2GHZ)
+            {
+                req->chan[i].tx_power = (aml_regdom_set_pwr(chan_to_fw_pwr(chan->max_reg_power),  aml_regdom_set_pwr(dsss_power, ofdm_power))) / 4;
+            }
+            else
+            {
+                req->chan[i].tx_power = (aml_regdom_set_pwr(chan_to_fw_pwr(chan->max_reg_power),  ofdm_power)) / 4;
+            }
+        }
+
     }
 
     /* Send the SCANU_START_REQ message to LMAC FW */
@@ -2773,7 +2913,7 @@ int aml_send_mesh_start_req(struct aml_hw *aml_hw, struct aml_vif *vif,
     for (i = 0; i < band->n_bitrates; i++) {
         u16 rate = band->bitrates[i].bitrate;
 
-        /* Read value is in in units of 100 Kbps, provided value is in units
+        /* Read value is in units of 100 Kbps, provided value is in units
          * of 1Mbps, and multiplied by 2 so that 5.5 becomes 11 */
         rate = (rate << 1) / 10;
 
@@ -2921,8 +3061,8 @@ void aml_send_mesh_peer_update_ntf(struct aml_hw *aml_hw, struct aml_vif *vif,
 
         /* Send the MESH_PEER_INFO_REQ message to UMAC FW */
         aml_send_msg(aml_hw, ntf, 0, 0, NULL);
-        /* coverity[leaked_storage] - ntf will be freed later */
     }
+    /* coverity[leaked_storage] - ntf will be freed later */
 }
 
 void aml_send_mesh_path_create_req(struct aml_hw *aml_hw, struct aml_vif *vif, u8 *tgt_addr)
@@ -2947,8 +3087,8 @@ void aml_send_mesh_path_create_req(struct aml_hw *aml_hw, struct aml_vif *vif, u
     vif->ap.flags |= AML_AP_CREATE_MESH_PATH;
 
     /* Send the MESH_PATH_CREATE_REQ message to UMAC FW */
-    /* coverity[leaked_storage] - req will be freed later */
     aml_send_msg(aml_hw, req, 0, 0, NULL);
+    /* coverity[leaked_storage] - req will be freed later */
 }
 
 int aml_send_mesh_path_update_req(struct aml_hw *aml_hw, struct aml_vif *vif, const u8 *tgt_addr,
@@ -2996,8 +3136,8 @@ void aml_send_mesh_proxy_add_req(struct aml_hw *aml_hw, struct aml_vif *vif, u8 
 
         /* Send the MESH_PROXY_ADD_REQ message to UMAC FW */
         aml_send_msg(aml_hw, req, 0, 0, NULL);
-        /* coverity[leaked_storage] - req will be freed later */
     }
+    /* coverity[leaked_storage] - req will be freed later */
 }
 
 int aml_send_tdls_peer_traffic_ind_req(struct aml_hw *aml_hw, struct aml_vif *aml_vif)
@@ -3070,7 +3210,7 @@ int aml_send_tdls_chan_switch_req(struct aml_hw *aml_hw, struct aml_vif *aml_vif
 #ifdef CONFIG_AML_SOFTMAC
     /* Check if channel switch already enabled on a TDLS peer */
     if (aml_hw->tdls_info.chsw_en) {
-        pr_err("TDLS channel switch already enabled for another TDLS station\n");
+        AML_ERR("TDLS channel switch already enabled for another TDLS station\n");
         return -ENOTSUPP;
     }
 #endif
@@ -3248,11 +3388,10 @@ int aml_send_mu_group_update_req(struct aml_hw *aml_hw, struct aml_sta *aml_sta)
     group_sta_for_each(aml_sta, group_id, map) {
         int user_pos = aml_mu_group_sta_get_pos(aml_hw, aml_sta, group_id);
 
-        if (WARN((i >= aml_sta->group_info.cnt),
-                 "STA%d: Too much group (%d)\n",
-                 aml_sta->sta_idx, i + 1))
+        if (i >= aml_sta->group_info.cnt) {
+            AML_INFO("STA%d: Too much group (%d)\n", aml_sta->sta_idx, i + 1)
             break;
-
+        }
         req->groups[i].group_id = group_id;
         req->groups[i].user_pos = user_pos;
 
@@ -3465,7 +3604,11 @@ int aml_send_me_shutdown(struct aml_hw *aml_hw)
     int count = 0;
     bool msg_recv;
     unsigned int value;
-    AML_INFO(" aml_send_me_shutdown begin \n");
+
+    if (bus_state_detect.bus_err || bus_state_detect.is_recy_ongoing) {
+        AML_INFO("bus err %d, recy ongong %d\n", bus_state_detect.bus_err, bus_state_detect.is_recy_ongoing);
+        return 0;
+    }
 
     shutdown_req = aml_priv_msg_zalloc(MM_SUB_SHUTDOWN, 0);
     if (!shutdown_req)
@@ -3488,44 +3631,26 @@ int aml_send_me_shutdown(struct aml_hw *aml_hw)
     } while (!msg_recv);
 
 #ifdef SDIO_MODE_ON
-    if (aml_bus_type == SDIO_MODE)
-        while (aml_disable_sdio_irq(aml_hw));
+    if (aml_bus_type == SDIO_MODE) {
+        while (aml_sdio_ack_irq(aml_hw));
+    }
 #endif
 
     AML_INFO(" shutdown_msg_send_ok! \n");
-
+    /* coverity[leaked_storage] - shutdown_req will be freed later */
     return ret;
 }
 
-int aml_csi_status_com_read(struct net_device *dev, struct csi_com_status_get_ind *ind)
+int aml_send_set_csi_data_done(struct aml_hw *aml_hw)
 {
     void *void_param;
-    struct aml_vif *aml_vif = netdev_priv(dev);
-    struct aml_hw *aml_hw = aml_vif->aml_hw;
 
-    void_param = aml_priv_msg_zalloc(MM_SUB_CSI_STATUS_COM_GET, 0);
+    void_param = aml_priv_msg_zalloc(MM_SUB_CSI_DATA_DONE, 0);
     if (!void_param)
         return -ENOMEM;
 
-    aml_priv_send_msg(aml_hw, void_param, 1, PRIV_CSI_STATUS_COM_CFM, ind);
-
-    return 0;
-}
-
-int aml_csi_status_sp_read(struct net_device *dev, int csi_mode, struct csi_sp_status_get_ind *ind)
-{
-    struct aml_vif *aml_vif = netdev_priv(dev);
-    struct aml_hw *aml_hw = aml_vif->aml_hw;
-    struct csi_status_sp_get_req *csi_get_param;
-
-    csi_get_param = aml_priv_msg_zalloc(MM_SUB_CSI_STATUS_SP_GET, sizeof(struct csi_status_sp_get_req));
-    if (!csi_get_param)
-        return -ENOMEM;
-
-    csi_get_param->csi_mode = csi_mode;
-    AML_INFO("csi mode:0x%x \n", csi_mode);
-    aml_priv_send_msg(aml_hw, csi_get_param, 1, PRIV_CSI_STATUS_SP_CFM, ind);
-
+    aml_priv_send_msg(aml_hw, void_param, 0, 0, NULL);
+    /* coverity[leaked_storage] - void_param will be freed later */
     return 0;
 }
 
@@ -3542,11 +3667,11 @@ int aml_csi_set(struct net_device *dev, struct csi_set_req *req)
     memcpy(csi_set_param, req, sizeof(struct csi_set_req));
 
     aml_priv_send_msg(aml_hw, csi_set_param, 0, 0, NULL);
-
+    /* coverity[leaked_storage] - csi_set_param will be freed later */
     return 0;
 }
 
-int aml_csi_runtime_set(struct net_device *dev, struct csi_set_req *req)
+int aml_csi_runtime_set(struct net_device *dev, struct csi_set_runtime_req *req)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
@@ -3559,7 +3684,7 @@ int aml_csi_runtime_set(struct net_device *dev, struct csi_set_req *req)
     memcpy(csi_set_runtime_param, req, sizeof(struct csi_set_runtime_req));
 
     aml_priv_send_msg(aml_hw, csi_set_runtime_param, 0, 0, NULL);
-
+    /* coverity[leaked_storage] - csi_set_runtime_param will be freed later */
     return 0;
 }
 
@@ -3583,7 +3708,7 @@ unsigned int aml_efuse_read(struct aml_hw *aml_hw, u32 addr)
          AML_ERR("read_efuse:%x erro!\n", ind.addr);
     }
     AML_INFO("read_efuse:value = %x\n", ind.value);
-
+    /* coverity[leaked_storage] - req will be freed later */
     return ind.value;
 }
 
@@ -3610,7 +3735,7 @@ int aml_set_limit_power(struct aml_hw *aml_hw, int limit_power_switch)
         return -ENOMEM;
 
     *fw_limit_power_switch = limit_power_switch;
-
+    /* coverity[leaked_storage] - fw_limit_power_switch will be freed later */
     return aml_priv_send_msg(aml_hw, fw_limit_power_switch, 0, 0, NULL);
 }
 
@@ -3623,13 +3748,16 @@ int aml_set_suspend_tx_flush(struct aml_hw *aml_hw, int tx_flush_enable)
         return -ENOMEM;
     AML_INFO("suspend notify fw tx flush \n");
     *fw_tx_flush_enable = tx_flush_enable;
-
-    return aml_priv_send_msg(aml_hw, fw_tx_flush_enable, 0, 0, NULL);
+    /* coverity[leaked_storage] - fw_tx_flush_enable will be freed later */
+    return aml_priv_send_msg(aml_hw, fw_tx_flush_enable, 0, MM_MSG_BYPASS_ID, NULL);
 }
 
 int aml_send_suspend_req(struct aml_hw *aml_hw, u16_l filter, enum wifi_suspend_state state)
 {
     struct mm_set_suspend_req *req;
+    int reqcfm = (state == WIFI_SUSPEND_STATE_NONE) ? true : false;
+    int ret;
+    u8 reason = -1;
 
     AML_DBG(AML_FN_ENTRY_STR);
 
@@ -3645,7 +3773,18 @@ int aml_send_suspend_req(struct aml_hw *aml_hw, u16_l filter, enum wifi_suspend_
     /* Send the MM_SUB_SET_SUSPEND_REQ message to FW */
     /* coverity[leaked_storage] - req will be freed later */
     // MSG_BYPASS: insmod module, not open interface
-    return aml_priv_send_msg(aml_hw, req, 0, MM_MSG_BYPASS_ID, NULL);
+    if ((reqcfm == true) && (aml_hw->flags & AML_DEV_STARTED)) {
+        struct mm_set_suspend_cfm cfm;
+        ret = aml_priv_send_msg(aml_hw, req, reqcfm, PRIV_RESUME_CFM, &cfm);
+        if (ret == 0)
+            reason = cfm.reason;
+        aml_hw->customer_priv.wake_reason = reason;
+
+    } else
+        ret = aml_priv_send_msg(aml_hw, req, 0, MM_MSG_BYPASS_ID, NULL);
+
+    /* coverity[leaked_storage] - req will be freed later */
+    return ret;
 }
 
 
@@ -3713,28 +3852,47 @@ int aml_send_arp_agent_req(struct aml_hw *aml_hw, struct aml_vif *vif, u8 enable
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
-int aml_get_sched_scan_req(struct aml_vif *aml_vif, struct cfg80211_sched_scan_request *request,
-    struct scanu_sched_scan_start_req *sched_start_req)
+static int aml_get_sched_scan_req(struct aml_vif *aml_vif,
+                                  struct cfg80211_sched_scan_request *request,
+                                  struct scanu_sched_scan_start_req *sched_start_req)
 {
     struct aml_hw *aml_hw = aml_vif->aml_hw;
     struct scanu_start_req *req = &sched_start_req->scanu_req;
     int i;
     uint8_t chan_flags = 0;
 
+    if (!request->match_sets || !request->scan_plans) {
+        AML_INFO("match_sets %p, scan_plans %p", (void *)request->match_sets, (void *)request->scan_plans);
+        return -EINVAL;
+    }
 #if CFG80211_VERSION_CODE > KERNEL_VERSION(4,12,0)
     sched_start_req->reqid = request->reqid;
+    aml_hw->pno_scan_reqid = request->reqid;
 #endif
-    sched_start_req->min_rssi_thold = request->match_sets->rssi_thold;
+    sched_start_req->delay = request->delay;
+    if (request->match_sets != NULL)
+        sched_start_req->min_rssi_thold = request->match_sets->rssi_thold;
 
+#if LINUX_VERSION_CODE > KERNEL_VERSION(4,11,0)
+    sched_start_req-> relative_rssi_set= request->relative_rssi_set;
+
+    //if rssi_set is true, set relative_rssi
+    if (sched_start_req-> relative_rssi_set)
+        sched_start_req-> relative_rssi = request->relative_rssi;
+
+    sched_start_req->rssi_adjust.band = request->rssi_adjust.band;
+    sched_start_req->rssi_adjust.delta = request->rssi_adjust.delta;
+    if (request->match_sets != NULL)
+        AML_INFO("rssi_thold %d:\n", request->match_sets->rssi_thold);
+#endif
      /* Set parameters */
     req->vif_idx = aml_vif->vif_index;
     req->chan_cnt = (u8)min_t(int, SCAN_CHANNEL_MAX, request->n_channels);
     req->ssid_cnt = (u8)min_t(int, SCAN_SSID_MAX, request->n_ssids);
-#if CFG80211_VERSION_CODE > KERNEL_VERSION(4,12,0)
-    memcpy(&req->bssid, request->match_sets->bssid, 6);
-#else
+    req->duration = 111000;
+
     req->bssid = mac_addr_bcst;
-#endif
+
     if (req->ssid_cnt == 0)
         chan_flags |= CHAN_NO_IR;
     for (i = 0; i < req->ssid_cnt; i++) {
@@ -3758,6 +3916,8 @@ int aml_get_sched_scan_req(struct aml_vif *aml_vif, struct cfg80211_sched_scan_r
         req->add_ies = 0;
     }
 
+    AML_INFO("chan cnt %d\n", req->chan_cnt);
+
     for (i = 0; i < req->chan_cnt; i++) {
         struct ieee80211_channel *chan = request->channels[i];
 
@@ -3775,9 +3935,18 @@ int aml_get_sched_scan_req(struct aml_vif *aml_vif, struct cfg80211_sched_scan_r
         sched_start_req->scan_plans[i].iterations = request->scan_plans[i].iterations;
     }
 
-     for (i = 0; i < sched_start_req->match_count; i++) {
-        sched_start_req->match_sets[i].rssiThreshold = request->match_sets[i].rssi_thold;
+     if (!request->match_sets)
+        return -EFAULT;
 
+     for (i = 0; i < sched_start_req->match_count; i++) {
+#if LINUX_VERSION_CODE > KERNEL_VERSION(3,15,0)
+        sched_start_req->match_sets[i].rssiThreshold = request->match_sets[i].rssi_thold;
+#endif
+
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(5,2,0) && LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0))
+        sched_start_req->match_sets[i].per_band_rssi_thold[0] = request->match_sets[i].per_band_rssi_thold[0];
+        sched_start_req->match_sets[i].per_band_rssi_thold[1] = request->match_sets[i].per_band_rssi_thold[1];
+#endif
 #if CFG80211_VERSION_CODE > KERNEL_VERSION(4,12,0)
         memcpy(&sched_start_req->match_sets[i].bssid.array[0], request->match_sets[i].bssid, ETH_ALEN);
 #endif
@@ -3786,6 +3955,7 @@ int aml_get_sched_scan_req(struct aml_vif *aml_vif, struct cfg80211_sched_scan_r
         memcpy(&sched_start_req->match_sets[i].ssId.array[0],
                request->match_sets[i].ssid.ssid,
                request->match_sets[i].ssid.ssid_len);
+        AML_INFO("len:%d ssid:%s", request->match_sets[i].ssid.ssid_len, request->match_sets[i].ssid.ssid);
     }
 
     return 0;
@@ -3841,6 +4011,64 @@ int aml_set_cali_param_req(struct aml_hw *aml_hw, struct Cali_Param *cali_param)
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
+int aml_set_rf_gain_setting_param_req(struct aml_hw *aml_hw, rf_gain_setting_param_t *rf_gain_setting)
+{
+    rf_gain_setting_param_t *req;
+    req = aml_priv_msg_zalloc(MM_SUB_RF_GAIN_SETTING_PAARM_REQ, sizeof(rf_gain_setting_param_t));
+
+    if (!req)
+        return -ENOMEM;
+
+    AML_INFO("aml_set_rf_gain_setting_param_req size: 0x%08x\n", sizeof(rf_gain_setting_param_t));
+
+    memcpy(req, rf_gain_setting, sizeof(rf_gain_setting_param_t));
+
+
+    /* coverity[leaked_storage] - req will be freed later */
+    return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
+}
+
+int aml_set_rf_cali_setting_param_req(struct aml_hw *aml_hw,  rf_cali_setting_param_t *rf_cali_setting_param)
+{
+    rf_cali_setting_param_t *req;
+    req = aml_priv_msg_zalloc(MM_SUB_RF_CALI_SETTING_PAARM_REQ, sizeof(rf_cali_setting_param_t));
+
+    if (!req)
+        return -ENOMEM;
+
+    memcpy(req, rf_cali_setting_param, sizeof(rf_cali_setting_param_t));
+
+
+    /* coverity[leaked_storage] - req will be freed later */
+    return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
+}
+
+int aml_set_phy_maskfilter_param_req(struct aml_hw *aml_hw, struct COUNTRY_PWR_LIMIT_CFG *country_pwr_limit_cfg, unsigned char ofdm_power)
+{
+    phy_maskfilter_cfg_param_t *req;
+    unsigned char shift_power;
+    req = aml_priv_msg_zalloc(MM_SUB_PHY_CFG_MASKFILTER_REQ, sizeof( phy_maskfilter_cfg_param_t));
+
+    if (!req)
+        return -ENOMEM;
+
+    shift_power = (ofdm_power >> 7);
+
+    if (shift_power)
+    {
+        memcpy(req, &country_pwr_limit_cfg->phy_maskfilter_cfg[1], sizeof( phy_maskfilter_cfg_param_t));
+    }
+    else
+    {
+        memcpy(req, &country_pwr_limit_cfg->phy_maskfilter_cfg[0], sizeof( phy_maskfilter_cfg_param_t));
+    }
+
+    req->ofdm_power = ofdm_power;
+
+    /* coverity[leaked_storage] - req will be freed later */
+    return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
+}
+
 int _aml_enable_wf(struct aml_vif *aml_vif, u32 wfflag)
 {
     struct aml_hw *aml_hw = aml_vif->aml_hw;
@@ -3883,13 +4111,13 @@ int _aml_get_efuse(struct aml_vif *aml_vif, u32 addr)
     memset((void *)req, 0,sizeof(struct get_efuse_req));
     req->addr = addr;
 
-    /* coverity[leaked_storage] - req will be freed later */
     aml_priv_send_msg(aml_hw, req, 1, PRIV_EFUSE_READ_RESULT, &ind);
 
     if (ind.addr != addr) {
          AML_ERR("get_efuse:0x%x erro!\n", ind.addr);
     }
 
+    /* coverity[leaked_storage] - req will be freed later */
     return ind.value;
 }
 
@@ -3910,27 +4138,61 @@ int _aml_set_efuse(struct aml_vif *aml_vif, u32 addr, u32 value)
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
+int _aml_set_rx_bw_nss(struct aml_vif *aml_vif, u8 bw, u8 nss)
+{
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    struct rx_bw_nss_param *req = NULL;
+    req = aml_priv_msg_zalloc(MM_SUB_SET_RX_BW_NSS, sizeof(struct rx_bw_nss_param));
+    if (!req)
+        return -ENOMEM;
+
+    req->bw = bw;
+    req->nss = nss;
+    req->vif_idx = aml_vif->vif_index;
+
+    /* coverity[leaked_storage] - req will be freed later */
+    return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
+}
+
+#ifdef CONFIG_AML_RECOVERY
 int aml_fw_reset(struct aml_hw *aml_hw, uint32_t mode)
 {
     struct fw_reset_req *req = NULL;
 
-    AML_INFO("aml_fw_reset %d", mode);
+    AML_INFO("%d", mode);
 
-    if (mode == 6) {
-        aml_hw->usb_rst_test = 1;
+    if (mode == 0)
+        aml_recy->recy_en = 0;
+    else if (mode == 1)
+        aml_recy->recy_en = 1;
+
+    req = aml_priv_msg_zalloc(MM_SUB_FW_RESET, sizeof(struct fw_reset_req));
+    if (!req)
+        return -ENOMEM;
+
+    memset((void *)req, 0, sizeof(struct fw_reset_req));
+    req->mode = mode;
+    /* coverity[leaked_storage] - req will be freed later */
+    return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
+}
+
+#ifdef SDIO_MODE_ON
+int aml_sdio_fw_alive_detect(struct aml_hw *aml_hw)
+{
+    void *void_param = NULL;
+
+    if (aml_bus_type != SDIO_MODE || aml_recy->host_recy)
         return 0;
 
-    } else {
-        req = aml_priv_msg_zalloc(MM_SUB_FW_RESET, sizeof(struct fw_reset_req));
-        if (!req)
-            return -ENOMEM;
+    void_param = aml_priv_msg_zalloc(MM_SUB_SDIO_REC_DETECT, 0);
+    if (!void_param)
+        return -ENOMEM;
 
-        memset((void *)req, 0, sizeof(struct fw_reset_req));
-        req->mode = mode;
-        /* coverity[leaked_storage] - req will be freed later */
-        return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
-    }
+    /* coverity[leaked_storage] - req will be freed later */
+    return aml_priv_send_msg(aml_hw, void_param, 0, MM_MSG_BYPASS_ID, NULL);
 }
+#endif
+#endif
 
 int _aml_set_macbypass(struct aml_vif *aml_vif, unsigned int dpd_cfg)
 {
@@ -3981,6 +4243,24 @@ int _aml_set_cca_timer(struct aml_vif *aml_vif, int timer1, int timer2, int cycl
 
     /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, cca_timer, 0, 0, NULL);
+}
+
+int _aml_set_aggregation(struct aml_vif *aml_vif, int dir, int agg_num)
+{
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    struct agg_req_t *agg_req = NULL;
+
+    agg_req = aml_priv_msg_zalloc(MM_SUB_SET_AGG_REQ, sizeof(struct agg_req_t));
+    if (!agg_req)
+        return -ENOMEM;
+
+    memset((void *)agg_req, 0,sizeof(struct agg_req_t));
+    agg_req->dir = dir;
+    agg_req->agg_num = agg_num;
+    agg_req->vif_idx = aml_vif->vif_index;
+
+    /* coverity[leaked_storage] - req will be freed later */
+    return aml_priv_send_msg(aml_hw, agg_req, 0, 0, NULL);
 
 }
 
@@ -3990,13 +4270,19 @@ int aml_send_sched_scan_req(struct aml_vif *aml_vif,
     struct aml_hw *aml_hw = aml_vif->aml_hw;
     struct scanu_sched_scan_start_req *sched_start_req;
 
+    if ((request->match_sets == NULL) || (request->n_match_sets == 0)) {
+        AML_INFO("match_sets %px n_match_sets %d\n",request->match_sets, request->n_match_sets);
+        return -ENOMEM;
+    }
+
     sched_start_req =  aml_priv_msg_zalloc(SCANU_SCHED_START_REQ, sizeof(struct scanu_sched_scan_start_req));
     if (!sched_start_req)
         return -ENOMEM;
+    AML_INFO("aml_vif %px,req %px\n", aml_vif, request);
 
     if (aml_get_sched_scan_req(aml_vif, request, sched_start_req)) {
-        /* coverity[leaked_storage] - sched_start_req have be freed*/
         aml_priv_msg_free(aml_hw, sched_start_req);
+        /* coverity[leaked_storage] - sched_start_req have be freed*/
         return -ENOMEM;
     }
 
@@ -4012,6 +4298,7 @@ int aml_send_sched_scan_stop_req(struct aml_vif *aml_vif, u64 reqid)
     sched_scan_stop_req =  aml_priv_msg_zalloc(SCANU_SCHED_STOP_REQ, sizeof(struct scanu_sched_scan_stop_req));
     if (!sched_scan_stop_req)
         return -ENOMEM;
+    AML_FN_ENTRY();
 
     sched_scan_stop_req->vif_idx = aml_vif->vif_index;
     sched_scan_stop_req->reqid = reqid;
@@ -4028,6 +4315,18 @@ int _aml_set_amsdu_tx(struct aml_hw *aml_hw, u8 amsdu_tx)
 
     memset(req, 0, sizeof(struct set_amsdu_tx_req));
     req->amsdu_tx = amsdu_tx;
+    /* coverity[leaked_storage] - req will be freed later */
+    return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
+}
+
+int _aml_set_prot_type(struct aml_hw *aml_hw, u32 prot_type)
+{
+    u32 *req = NULL;
+    req = aml_priv_msg_zalloc(MM_SUB_SET_PROT_TYPE, sizeof(u32));
+    if (!req)
+      return -ENOMEM;
+
+    *req = prot_type;
     /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
@@ -4155,9 +4454,19 @@ int aml_suspend_form_fw_dynamic_check(struct aml_hw *aml_hw, int check)
         return -ENOMEM;
 
     req->can_check = check;
-
+    /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
+}
 
+int _aml_trig_sec_test(struct aml_hw *aml_hw, uint32_t *retval)
+{
+    void *void_param;
+    void_param = aml_priv_msg_zalloc(MM_SUB_TRIG_SEC_TEST, sizeof(uint32_t));
+    if (!void_param)
+        return -ENOMEM;
+
+    /* coverity[leaked_storage] - pval will be freed later */
+    return aml_priv_send_msg(aml_hw, void_param, 0, 0, NULL);
 }
 
 int aml_tko_activate(struct aml_hw *aml_hw, struct aml_vif *vif, u8 active)
@@ -4184,7 +4493,7 @@ int aml_mdns_set_offload_state(struct aml_hw *aml_hw, int enable)
         return -ENOMEM;
 
     req->enable = enable;
-
+    /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
@@ -4197,7 +4506,7 @@ int aml_mdns_set_passthrough_behavior(struct aml_hw *aml_hw, int behavior)
         return -ENOMEM;
 
     req->behavior = behavior;
-
+    /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
@@ -4209,6 +4518,7 @@ int aml_mdns_reset_all(struct aml_hw *aml_hw)
     if (!req)
         return -ENOMEM;
 
+    /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
@@ -4224,6 +4534,7 @@ int aml_mdns_add_protocol_data_status(struct aml_hw *aml_hw, void *list_param, m
     if ((offloadData->matchCriteriaListNum > MDNS_LIST_CRITERIA_MAX)
         || (offloadData->rawOffloadPacketLen > MDNS_RAW_DATA_LENGTH_MAX)) {
         aml_priv_msg_free(aml_hw, req);
+        /* coverity[leaked_storage] - req have be freed */
         return -ENOMEM;
     }
 
@@ -4233,14 +4544,18 @@ int aml_mdns_add_protocol_data_status(struct aml_hw *aml_hw, void *list_param, m
     memcpy(req->list_criteria, list_param, req->list_len * sizeof(struct match_criteria));
 
     ret = aml_priv_send_msg(aml_hw, req, 1, PRIV_MDNS_ADDDATA_CFM, &cfm);
-    if (ret != 0)
+    if (ret != 0) {
+        /* coverity[leaked_storage] - req will be freed later */
         return ret;
+    }
 
-    if (cfm.state != CO_OK)
+    if (cfm.state != CO_OK) {
+        /* coverity[leaked_storage] - req will be freed later */
         return -EPERM;
+    }
 
     *index = cfm.index;
-
+    /* coverity[leaked_storage] - req will be freed later */
     return 0;
 }
 
@@ -4257,7 +4572,7 @@ int aml_mdns_add_protocol_data(struct aml_hw *aml_hw, uint8_t *raw_data, uint8_t
     req->index = index;
     memcpy(req->raw_offload_packet, raw_data, data_len);
     ret = aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
-
+    /* coverity[leaked_storage] - req will be freed later */
     return ret;
 }
 
@@ -4272,6 +4587,7 @@ int aml_mdns_remove_protocol_data(struct aml_hw *aml_hw, int index)
 
     req->index = index;
 
+    /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
@@ -4291,9 +4607,12 @@ int aml_mdns_get_reset_hit_counter(struct aml_hw *aml_hw, int index)
     req->index = index;
 
     ret = aml_priv_send_msg(aml_hw, req, 1, PRIV_MDNS_GET_HIT_CFM, &cfm);
-    if (ret != 0)
+    if (ret != 0) {
+        /* coverity[leaked_storage] - req will be freed later */
         return ret;
+    }
 
+    /* coverity[leaked_storage] - req will be freed later */
     return cfm.cnt;
 }
 
@@ -4310,9 +4629,11 @@ int aml_mdns_get_reset_miss_counter(struct aml_hw *aml_hw)
     //req->index = index;
 
     ret = aml_priv_send_msg(aml_hw, req, 1, PRIV_MDNS_GET_MISS_CFM, &cfm);
-    if (ret != 0)
+    if (ret != 0) {
+        /* coverity[leaked_storage] - req will be freed later */
         return -1;  // need -1 for upper check
-
+    }
+    /* coverity[leaked_storage] - req will be freed later */
     return cfm.cnt;
 }
 
@@ -4331,11 +4652,13 @@ int aml_mdns_add_passthrough_list(struct aml_hw *aml_hw, uint8_t *qname, int len
     memcpy(req->qname, qname, length);
 
     ret = aml_priv_send_msg(aml_hw, req, 1, PRIV_MDNS_ADDPASSTHROUGH_CFM, &cfm);
-    if (ret != 0)
+    if (ret != 0) {
+        /* coverity[leaked_storage] - req will be freed later */
         return -1;
+    }
 
     AML_INFO("state :%d", cfm.state);
-
+    /* coverity[leaked_storage] - req will be freed later */
     return cfm.state;
 }
 
@@ -4351,6 +4674,7 @@ int aml_mdns_remove_passthrough_list(struct aml_hw *aml_hw, uint8_t *qname, int 
     req->length = length;
     memcpy(req->qname, qname, length);
 
+    /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
@@ -4372,6 +4696,7 @@ int aml_pcie_dl_malloc_test(struct aml_hw *aml_hw, int start_addr, int len, u32_
     pcie_dl_param->payload = *(read_addr);
     AML_INFO("---dma_addr:%lx, start_addr:%lx \n", pcie_dl_param->dma_addr,pcie_dl_param->start_addr);
     AML_INFO("---dma_addr_payload:%x \n", *(read_addr));
+    /* coverity[leaked_storage] - pcie_dl_param will be freed later */
     return aml_priv_send_msg(aml_hw, pcie_dl_param, 0, 0, NULL);
 }
 
@@ -4390,6 +4715,7 @@ int aml_pcie_ul_malloc_test(struct aml_hw *aml_hw, int start_addr, int len, u32_
     pcie_ul_param->payload = payload;
     AML_INFO("---dest_addr:%lx, src_addr:%lx", pcie_ul_param->dest_addr,pcie_ul_param->src_addr);
     AML_INFO("---dma_addr_payload:%x", payload);
+    /* coverity[leaked_storage] - pcie_ul_param will be freed later */
     return aml_priv_send_msg(aml_hw, pcie_ul_param, 0, 0, NULL);
 }
 
@@ -4417,7 +4743,7 @@ int aml_pcie_prssr_test(struct net_device *dev, int start_addr, int len, u32_l p
 }
 #endif
 
-int aml_coex_cmd(struct net_device *dev, u32_l coex_cmd, u32_l cmd_ctxt_1, u32_l cmd_ctxt_2)
+int aml_set_coex_mode_cmd(struct net_device *dev, u32_l coex_cmd)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
@@ -4427,12 +4753,24 @@ int aml_coex_cmd(struct net_device *dev, u32_l coex_cmd, u32_l cmd_ctxt_1, u32_l
     if (!coex_cmd_param)
         return -ENOMEM;
     coex_cmd_param->coex_cmd = coex_cmd;
-    coex_cmd_param->cmd_txt_1 = cmd_ctxt_1;
-    coex_cmd_param->cmd_txt_2 = cmd_ctxt_2;
-    AML_INFO(" coex_cmd: %d, cmd_ctxt_1:%X, cmd_ctxt_2:%X", coex_cmd, cmd_ctxt_1, cmd_ctxt_2);
+    AML_INFO("set coex mode cmd: %d", coex_cmd);
     /* coverity[leaked_storage] - coex_cmd_param will be freed later */
     return aml_priv_send_msg(aml_hw, coex_cmd_param, 0, 0, NULL);
 }
+
+#ifdef CONFIG_AML_APF
+extern uint8_t apf_macaddr3;
+extern uint8_t apf_macaddr4;
+extern uint8_t apf_macaddr5;
+// Used to dynamically modify the MAC address in the program via the iwpriv command.
+int aml_apf_set_mac_addr(struct net_device *dev, u8 mac_addr3, u8 mac_addr4, u8 mac_addr5)
+{
+    apf_macaddr3 = mac_addr3;
+    apf_macaddr4 = mac_addr4;
+    apf_macaddr5 = mac_addr5;
+    return 0;
+}
+#endif
 
 int aml_coex_get_status(struct net_device *dev)
 {
@@ -4473,7 +4811,7 @@ int aml_send_notify_ip(struct aml_vif *aml_vif, u8_l ip_ver, u8_l *ip_addr)
     notify_ip_addr_t *notify_ip_addr;
 
     if (!aml_vif) {
-        printk("aml vif param invalid\n");
+        AML_ERR("aml vif param invalid\n");
         return -EINVAL;
     }
     aml_hw = aml_vif->aml_hw;
@@ -4503,6 +4841,7 @@ int aml_send_fwlog_cmd(struct aml_hw *aml_hw, int mode)
         return -ENOMEM;
 
     fwlog_param->mode = mode;
+    AML_INFO("fwlog_param->mode:%d\n", fwlog_param->mode);
 
     /* coverity[leaked_storage] - fwlog_param will be freed later */
     return aml_priv_send_msg(aml_hw, fwlog_param, 0, 0, NULL);
@@ -4518,6 +4857,7 @@ int aml_send_scc_conflict_notify(struct aml_vif *ap_vif, u8 sta_vif_idx, struct 
     }
     scc_conflict->ap_idx = ap_vif->vif_index;
     scc_conflict->sta_idx = sta_vif_idx;
+    /* coverity[leaked_storage] - scc_conflict will be freed later */
     return aml_priv_send_msg(aml_hw, scc_conflict, 1, PRIV_SCC_CONFLICT_CFM, scc_cfm);
 }
 
@@ -4525,6 +4865,7 @@ int aml_send_sync_trace(struct aml_hw *aml_hw)
 {
     static u32 sync_token = 0;
     sync_trace_token *sync_trace;
+
     if (atomic_read(&g_wifi_pm.drv_suspend_cnt) == 1 || atomic_read(&g_wifi_pm.bus_suspend_cnt) == 1) {
         AML_INFO("driver in suspend not send sync trace");
         return -1;
@@ -4542,14 +4883,29 @@ int aml_send_sync_trace(struct aml_hw *aml_hw)
     sync_trace->time = ktime_get_ns();
     AML_INFO("sync token[%d] time[%llu]", sync_trace->token, sync_trace->time);
 
+    /* coverity[leaked_storage] - sync_trace will be freed later */
     return aml_priv_send_msg(aml_hw, sync_trace, 0, 0, NULL);
+}
+
+int aml_regdom_en(struct aml_hw *aml_hw, uint32_t reg_en)
+{
+    struct regdom_en_req *req = NULL;
+
+    req = aml_priv_msg_zalloc(MM_SUB_REGDOM_EN, sizeof(struct regdom_en_req));
+    if (!req)
+        return -ENOMEM;
+    memset((void *)req, 0,sizeof(struct regdom_en_req));
+    req->reg_en = reg_en;
+
+    /* coverity[leaked_storage] - req will be freed later */
+    return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
 int aml_send_dhcp_req(struct aml_hw *aml_hw, struct aml_vif *aml_vif, uint8_t work)
 {
     struct mm_dhcpoffload_req *req;
 
-    AML_DBG(AML_FN_ENTRY_STR);
+    AML_INFO(AML_FN_ENTRY_STR);
 
     req = aml_priv_msg_zalloc(MM_SUB_DHCP_REQ, sizeof(struct mm_dhcpoffload_req));
     if (!req)
@@ -4557,7 +4913,7 @@ int aml_send_dhcp_req(struct aml_hw *aml_hw, struct aml_vif *aml_vif, uint8_t wo
 
     req->dhcp_enable = work;
     req->vif_idx = aml_vif->vif_index;
-
+    /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
@@ -4572,24 +4928,16 @@ int aml_send_extcapab_req(struct aml_hw *aml_hw)
         return -ENOMEM;
 
     memcpy(&req->ext_capab[0], &aml_hw->ext_capa[0], 10);
-
+    /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, MM_MSG_BYPASS_ID, NULL);
 }
 
 void aml_sync_trace_cb(struct timer_list *t)
 {
     struct aml_hw *aml_hw = from_timer(aml_hw, t, sync_trace_timer);
-    enum aml_wq_type type = AML_WQ_SYNC_TRACE;
-    struct aml_wq *aml_wq;
 
-    aml_wq = aml_wq_alloc(1);
-    if (!aml_wq) {
-        AML_INFO("alloc workqueue out of memory");
-        return;
-    }
-    aml_wq->id = AML_WQ_SYNC_TRACE;
-    memcpy(aml_wq->data, &type, 1);
-    aml_wq_add(aml_hw, aml_wq);
+    aml_wq_do(aml_send_sync_trace, aml_hw);
+
     mod_timer(&aml_hw->sync_trace_timer, jiffies + AML_SYNC_TRACE_MON_INTERVAL);
 }
 
@@ -4611,20 +4959,13 @@ void aml_sync_fw_trace_time_cb(struct timer_list *t)
 {
     struct aml_hw *aml_hw = from_timer(aml_hw, t, detection_trace_timer);
     static uint32_t trace_ts = 0;
-    enum aml_wq_type type = AML_WQ_HOST_GET_TRACE;
-    struct aml_wq *aml_wq;
 
     if ((aml_hw->trace_bit_flag & TRACE_ENABLE_BIT_FLAG)
         && !(aml_hw->trace_bit_flag & TRACE_TIMEOUT_FORCE_READ_BIT_FLAG)
         && g_trace_ts == trace_ts) {
-        aml_wq = aml_wq_alloc(1);
-        if (!aml_wq) {
-            AML_INFO("alloc workqueue out of memory");
-            return;
-        }
-        aml_wq->id = AML_WQ_HOST_GET_TRACE;
-        memcpy(aml_wq->data, &type, 1);
-        aml_wq_add(aml_hw, aml_wq);
+        /* fw trace log 30s is not updated, host force get trace now */
+        AML_INFO(">>>No new fw trace received, host force get trace now.");
+        aml_wq_do(aml_traceind, aml_hw);
         aml_hw->trace_bit_flag |= TRACE_TIMEOUT_FORCE_READ_BIT_FLAG;
     }
     trace_ts = g_trace_ts;
@@ -4667,6 +5008,7 @@ int aml_txq_unexpection(struct net_device *dev)
     AML_INFO("token[%d]", token);
     show_tx_msg_req->token = token++;
     aml_hw->show_switch_info = 50;
+    /* coverity[leaked_storage] - show_tx_msg_req will be freed later */
     return aml_priv_send_msg(aml_hw, show_tx_msg_req, 0, 0, NULL);
 }
 
@@ -4679,8 +5021,8 @@ int aml_send_set_buf_state_req(struct aml_hw *aml_hw, int buf_state)
         return -ENOMEM;
 
     *fw_buf_state = buf_state;
-
-    return aml_priv_send_msg(aml_hw, fw_buf_state, 0, 0, NULL);
+    /* coverity[leaked_storage] - fw_buf_state will be freed later */
+    return aml_priv_send_msg(aml_hw, fw_buf_state, 0, MM_MSG_BYPASS_ID, NULL);
 }
 
 int _aml_set_la_capture(struct aml_vif *aml_vif, u32 bus1, u32 bus2)
@@ -4710,6 +5052,7 @@ int _aml_set_la_enable(struct aml_hw *aml_hw, int value)
 
     *la_status = value;
 
+    /* coverity[leaked_storage] - la_status will be freed later */
     return aml_priv_send_msg(aml_hw, la_status, 0, 0, NULL);
 }
 
@@ -4723,6 +5066,7 @@ int _aml_set_usb_trace_enable(struct aml_hw *aml_hw, int value)
 
     *trace_status = value;
 
+    /* coverity[leaked_storage] - trace_status will be freed later */
     return aml_priv_send_msg(aml_hw, trace_status, 0, 0, NULL);
 }
 
@@ -4737,6 +5081,8 @@ int aml_set_mcc_ratio(struct aml_vif *aml_vif, int ratio)
 
     if (ratio < 1 || ratio > 9) {
         AML_INFO("ratio para error, should[1:9], set:%d,", ratio);
+        aml_priv_msg_free(aml_hw, mcc_ratio_param);
+        /* coverity[leaked_storage] - remove_if_req have already freed */
         return -ENOMEM;
     }
 
@@ -4756,7 +5102,21 @@ int aml_set_wfa_rts_based_txop(struct aml_vif *aml_vif, int enable)
         return -ENOMEM;
 
     wfa_test_param->wfa_set_rts_based_txop_dur = enable;
+    /* coverity[leaked_storage] - wfa_test_param will be freed later */
+    return aml_priv_send_msg(aml_hw, wfa_test_param, 0, 0, NULL);
+}
 
+int aml_set_wmm_ie(struct aml_vif *aml_vif, int enable)
+{
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    struct wfa_test_req *wfa_test_param = NULL;
+
+    wfa_test_param = aml_priv_msg_zalloc(MM_SUB_SET_WFA_INFO, sizeof(struct wfa_test_req));
+    if (!wfa_test_param)
+        return -ENOMEM;
+
+    wfa_test_param->wfa_set_wmm_ie = !enable;
+    /* coverity[leaked_storage] - wfa_test_param will be freed later */
     return aml_priv_send_msg(aml_hw, wfa_test_param, 0, 0, NULL);
 }
 
@@ -4770,7 +5130,7 @@ int aml_set_wfa_agg_tx_cnt_thres(struct aml_vif *aml_vif, int enable)
         return -ENOMEM;
 
     wfa_test_param->wfa_set_agg_tx_cnt_thres = enable;
-
+    /* coverity[leaked_storage] - wfa_test_param will be freed later */
     return aml_priv_send_msg(aml_hw, wfa_test_param, 0, 0, NULL);
 }
 
@@ -4784,19 +5144,21 @@ int aml_reset_edca(struct aml_vif *aml_vif, int enable)
         return -ENOMEM;
 
     wfa_test_param->wfa_reset_edca = enable;
-
+    /* coverity[leaked_storage] - wfa_test_param will be freed later */
     return aml_priv_send_msg(aml_hw, wfa_test_param, 0, 0, NULL);
 
 }
 
 #ifdef CONFIG_AML_NAN_SUPPORT
-int aml_nan_send_enable_req(struct aml_hw *aml_hw, wifi_nan_cfg *nan_conf)
+int aml_nan_enable(struct aml_hw *aml_hw, wifi_nan_cfg *nan_conf)
 {
     int ret = 0;
     wifi_nan_cfg *nan_conf_req = NULL;
     struct nan_enable_cfm cfm = {0};
 
-    nan_conf_req =  aml_msg_zalloc(NAN_ENABLE_REQ, TASK_NAN, DRV_TASK_ID, sizeof(wifi_nan_cfg));
+    aml_nan_init();
+
+    nan_conf_req = aml_msg_zalloc(NAN_ENABLE_REQ, TASK_NAN, DRV_TASK_ID, sizeof(wifi_nan_cfg));
     if (!nan_conf_req)
         return -ENOMEM;
 
@@ -4808,37 +5170,68 @@ int aml_nan_send_enable_req(struct aml_hw *aml_hw, wifi_nan_cfg *nan_conf)
     /* Send the NAN_ENABLE_REQ message to LMAC FW */
     ret = aml_send_msg(aml_hw, nan_conf_req, 1, NAN_ENABLE_CFM, &cfm);
     AML_INFO("[NAN enable] status: %d, vif_idx = %d", cfm.status, cfm.vif_idx);
+    /* coverity[leaked_storage] - nan_conf_req will be freed later */
     return ret;
 }
 
-int aml_nan_send_publish_request(struct aml_hw *aml_hw, wifi_nan_publish_cfg *pub_conf)
+int aml_nan_disable(struct aml_hw *aml_hw)
 {
-    uint16_t publish_id = 0;
+    struct nan_enable_cfm cfm = {0};
+    int *status = NULL;
+
+    status = (int *)aml_msg_zalloc(NAN_DISABLE_REQ, TASK_NAN, DRV_TASK_ID, sizeof(int));
+    if (!status)
+        return -ENOMEM;
+
+    /* Send the NAN_ENABLE_REQ message to LMAC FW */
+    aml_send_msg(aml_hw, status, 1, NAN_DISABLE_CFM, &cfm);
+    /* coverity[leaked_storage] - status will be freed later */
+
+    AML_INFO("[NAN disable] status: %d, vif_idx = %d", cfm.status, cfm.vif_idx);
+
+    return cfm.status;
+}
+
+int aml_nan_publish_service(struct aml_hw *aml_hw,
+    publish_config *pub_cfg, uint8_t service_id, bool cancel)
+{
+    uint8_t publish_id = 0;
     wifi_nan_publish_cfg *publish_req = NULL;
 
-    publish_req =  aml_msg_zalloc(NAN_PUBLISH_REQ, TASK_NAN, DRV_TASK_ID, sizeof(wifi_nan_publish_cfg));
+    publish_req = aml_msg_zalloc(NAN_PUBLISH_REQ, TASK_NAN, DRV_TASK_ID, sizeof(wifi_nan_publish_cfg));
     if (!publish_req)
         return -ENOMEM;
 
     memset((void *)publish_req, 0, sizeof(wifi_nan_publish_cfg));
-    if (pub_conf->type == NAN_PUBLISH_UNSOLICITED) {
-        memcpy(publish_req->service_name, pub_conf->service_name, strlen(pub_conf->service_name));
-        memcpy(publish_req->svc_info, pub_conf->svc_info, strlen(pub_conf->svc_info));
-        publish_req->type = NAN_PUBLISH_UNSOLICITED;
-        publish_id = aml_nan_publish_req(publish_req);
-    } else if (pub_conf->type == NAN_PUBLISH_SOLICITED) {
-        memcpy(publish_req, pub_conf, sizeof(wifi_nan_publish_cfg));
-        publish_id = pub_conf->publish_id;
-    }
-    AML_INFO("publish type = %d  peer_mac: "MACSTR"", publish_req->type, MAC2STR(publish_req->peer_mac));
-    aml_send_msg(aml_hw, publish_req, 0, 0, NULL);
 
-    return publish_id;
+    if (cancel) {
+        publish_req->publish_id = service_id;
+        publish_req->inst_id = service_id;
+        publish_req->cancel = true;
+        aml_send_msg(aml_hw, publish_req, 0, 0, NULL);
+        return publish_req->publish_id;
+    }
+
+    if (pub_cfg->publish_type == NAN_PUBLISH_UNSOLICITED) {
+        publish_id = aml_nan_get_unsolcoted_pub_cfg(aml_hw, publish_req, pub_cfg);
+    } else if (pub_cfg->publish_type == NAN_PUBLISH_SOLICITED) {
+        publish_id = aml_nan_get_solcoted_pub_cfg(publish_req, pub_cfg);
+    }
+
+    if (publish_id) {
+        aml_send_msg(aml_hw, publish_req, 0, 0, NULL);
+        return publish_id;
+    } else {
+        aml_msg_free(aml_hw, publish_req);
+    }
+
+    return AML_FAIL;
 }
 
-int aml_nan_send_subscribe_request(struct aml_hw *aml_hw, wifi_nan_subscribe_cfg *subscribe_conf)
+int aml_nan_subscribe_service(struct aml_hw *aml_hw,
+    subscribe_config *sub_cfg,  uint8_t service_id, bool cancel)
 {
-    uint16_t subscribe_id = 0;
+    uint8_t subscribe_id = 0;
     wifi_nan_subscribe_cfg *subscribe_req = NULL;
 
     subscribe_req =  aml_msg_zalloc(NAN_SUBSCRIBE_REQ, TASK_NAN, DRV_TASK_ID, sizeof(wifi_nan_subscribe_cfg));
@@ -4846,21 +5239,32 @@ int aml_nan_send_subscribe_request(struct aml_hw *aml_hw, wifi_nan_subscribe_cfg
         return -ENOMEM;
 
     memset((void *)subscribe_req, 0, sizeof(wifi_nan_publish_cfg));
-    memcpy(subscribe_req->service_name, subscribe_conf->service_name, strlen(subscribe_conf->service_name));
-    memcpy(subscribe_req->svc_info, subscribe_conf->svc_info, strlen(subscribe_conf->svc_info));
-    subscribe_id  = aml_nan_subscribe_req(subscribe_req);
 
-    aml_send_msg(aml_hw, subscribe_req, 0, 0, NULL);
+    if (cancel) {
+        subscribe_req->subscribe_id = service_id;
+        subscribe_req->cancel = true;
+        aml_send_msg(aml_hw, subscribe_req, 0, 0, NULL);
+        return subscribe_req->subscribe_id;
+    }
 
-    return subscribe_id;
+    subscribe_id = aml_nan_get_sub_cfg(aml_hw, subscribe_req, sub_cfg);
+    if (subscribe_id) {
+        if (subscribe_req->type == NAN_SUBSCRIBE_ACTIVE)
+            aml_send_msg(aml_hw, subscribe_req, 0, 0, NULL);
+        return subscribe_id;
+    } else {
+        aml_msg_free(aml_hw, subscribe_req);
+    }
+
+    return AML_FAIL;
 }
 
-int aml_nan_send_follow_up_msg(struct aml_hw *aml_hw, wifi_nan_followup_cfg *followup_conf)
+int aml_nan_send_message(struct aml_hw *aml_hw, wifi_nan_followup_cfg *followup_conf)
 {
     int ret = 0;
     wifi_nan_followup_cfg *followup_req = NULL;
 
-    ret = aml_nan_followup_send(followup_conf);
+    ret = aml_nan_get_followup_cfg(followup_conf);
     if (ret < 0) {
         return AML_FAIL;
     }
@@ -4881,6 +5285,34 @@ int aml_nan_send_follow_up_msg(struct aml_hw *aml_hw, wifi_nan_followup_cfg *fol
 
     return AML_OK;
 }
+
+int aml_nan_cancel_service(struct aml_hw *aml_hw, uint8_t service_id)
+{
+    struct own_svc_info *p_own_svc = aml_nan_find_own_svc(service_id);
+    if (!p_own_svc) {
+        AML_INFO("Cannot find service id %d!", service_id);
+        return AML_FAIL;
+    }
+
+    if (p_own_svc->type == NAN_PUBLISH) {
+        if (aml_nan_publish_service(aml_hw, NULL, service_id, true) > 0) {
+            aml_nan_reset_svc(service_id, false);
+            AML_INFO("Canceled Publish with Service ID %d", service_id);
+            return AML_OK;
+        }
+    }
+
+    if (p_own_svc->type == NAN_SUBSCRIBE) {
+        if (aml_nan_subscribe_service(aml_hw, NULL, service_id, true) > 0) {
+            aml_nan_reset_svc(service_id, false);
+            AML_INFO("Canceled Subscribe with Service ID %d", service_id);
+            return AML_OK;
+        }
+    }
+
+    return AML_FAIL;
+}
+
 #endif
 
 int aml_send_get_rxfail_cnt(struct aml_hw *aml_hw, int vif_index)
@@ -4894,9 +5326,11 @@ int aml_send_get_rxfail_cnt(struct aml_hw *aml_hw, int vif_index)
 
     *switch_status = vif_index;
     ret = aml_priv_send_msg(aml_hw, switch_status, 1, PRIV_RXFAILCNT_CFM, &cfm);
-    if (ret == 0)
+    if (ret == 0) {
+        /* coverity[leaked_storage] - switch_status will be freed later */
         return cfm.cnt;
-
+    }
+    /* coverity[leaked_storage] - switch_status will be freed later */
     return -1;
 }
 
@@ -4911,7 +5345,7 @@ int aml_send_cfg_req(struct aml_hw *aml_hw, bool_l vht_bfee, bool_l vht_mubfee, 
     req->vht_mubfee = vht_mubfee;
     req->bw = bw;
     req->retry_cnt = retry_cnt;
-
+    /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
@@ -4931,6 +5365,28 @@ int aml_set_custom_ver_req(struct aml_hw *aml_hw, u8 version)
     return aml_priv_send_msg(aml_hw, req, 0, MM_MSG_BYPASS_ID, NULL);
 }
 
+int aml_get_wifi_info_req(struct aml_hw *aml_hw, uint8_t vif_idx, struct wifi_info *cfm)
+{
+    struct get_fw_wifi_info *req = NULL;
+    int ret;
+
+    req = aml_priv_msg_zalloc(MM_SUB_GET_WIFI_INFO_REQ, sizeof(struct get_fw_wifi_info));
+    if (!req)
+        return -ENOMEM;
+
+    req->vif_idx = vif_idx;
+
+    /* coverity[leaked_storage] - req will be freed later */
+    ret = aml_priv_send_msg(aml_hw, req, 1, PRIV_GET_WIFI_INFO_CFM, cfm);
+    if (ret == 0) {
+        /* coverity[leaked_storage] - req will be freed later */
+        return 0;
+    }
+    /* coverity[leaked_storage] - req will be freed later */
+    return -1;
+}
+
+
 int aml_send_default_key(struct aml_hw *aml_hw, u8 vif_index, u8 key_index, bool unicast, bool multicast)
 {
     struct add_default_key *req = aml_priv_msg_zalloc(MM_SUB_ADD_DEFAULT_KEY, sizeof(struct add_default_key));
@@ -4941,7 +5397,238 @@ int aml_send_default_key(struct aml_hw *aml_hw, u8 vif_index, u8 key_index, bool
     req->unicast = unicast;
     req->multicast = multicast;
     req->vif_idx = vif_index;
+    /* coverity[leaked_storage] - req will be freed later */
     return aml_priv_send_msg(aml_hw, req, 0, 0, NULL);
 }
 
+int aml_send_action(struct aml_vif *aml_vif, int type)
+{
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    struct send_action_req *send_action_param;
 
+
+    send_action_param = aml_priv_msg_zalloc(MM_SEND_ACTION_REQ, sizeof(struct send_action_req));
+    if (!send_action_param)
+        return -ENOMEM;
+
+    send_action_param->type = type;
+    send_action_param->vif_idx = aml_vif->vif_index;
+    /* coverity[leaked_storage] - req will be freed later */
+    return aml_priv_send_msg(aml_hw, send_action_param, 0, 0, NULL);
+}
+
+#ifdef CONFIG_AML_APF
+/**
+ * aml_apf_get_capabilities - Retrieve Android Packet Filter (APF) capabilities from hardware
+ * @aml_hw: Pointer to the AML hardware structure
+ *
+ * This function queries the hardware for APF capabilities, including the maximum
+ * length of APF programs that can be supported. It updates the APF capabilities
+ * in the AML hardware structure.
+ *
+ * Return:
+ *   0 on success, or a negative error code on failure.
+ */
+int aml_apf_get_capabilities(struct aml_hw *aml_hw)
+{
+    void *apf_req;
+
+    apf_req = aml_priv_msg_zalloc(MM_SUB_GET_APF_CAPABILITIES, 0);
+    if (!apf_req)
+        return -ENOMEM;
+
+    return aml_priv_send_msg(aml_hw, apf_req, 1, PRIV_APF_GET_CAPABILITIES_CFM, &aml_hw->apf_params.apf_cap);
+}
+
+/**
+ * aml_apf_add_filter - Add Android Packet Filter (APF) to hardware
+ * @aml_hw: Pointer to the AML hardware structure
+ * @program: Pointer to the APF filter program buffer
+ * @program_len: Length of the APF filter program buffer
+ *
+ * This function adds an APF filter program to the hardware. It takes the APF filter
+ * program buffer and its length as input parameters and configures the hardware
+ * accordingly.
+ *
+ * Return:
+ *   0 on success, or a negative error code on failure.
+ */
+int aml_apf_add_filter(struct aml_hw *aml_hw, u8_l * program, uint32_t program_len)
+{
+    int i;
+    u8_l * dst_addr;
+    struct apf_filter * apf_add_filter_req;
+    struct aml_plat * aml_plat = aml_hw->plat;
+    uint32_t align_size = 0;
+    // Download program to firmware
+    if (aml_bus_type == USB_MODE) {
+            aml_plat->hif_ops->hi_write_sram((unsigned char *)program,
+                (unsigned char *)(aml_hw->apf_params.apf_cap.apf_mem_addr), program_len, USB_EP4);
+    }
+#ifdef SDIO_MODE_ON
+    else if (aml_bus_type == SDIO_MODE) {
+        align_size = program_len / 512 * 512;
+        if (align_size != 0)
+        {
+            aml_plat->hif_sdio_ops->hi_random_ram_write((unsigned char *)program,
+                (unsigned char *)aml_hw->apf_params.apf_cap.apf_mem_addr, align_size);
+        }
+
+        if (program_len % 512 != 0)
+        {
+            aml_plat->hif_sdio_ops->hi_random_ram_write((unsigned char *)program + align_size,
+                (unsigned char *)(aml_hw->apf_params.apf_cap.apf_mem_addr + aml_hw->apf_params.apf_cap.max_len), program_len % 512);
+        }
+    }
+#endif
+    else {
+        dst_addr = AML_ADDR(aml_plat, AML_ADDR_CPU, aml_hw->apf_params.apf_cap.apf_mem_addr);
+        for (i = 0; i < program_len; i++) {
+            *(dst_addr)++ = *program++;
+        }
+    }
+
+    // send msg
+    apf_add_filter_req = aml_priv_msg_zalloc(MM_SUB_ADD_APF_FILTER, sizeof(struct apf_filter));
+    if (!apf_add_filter_req)
+        return -ENOMEM;
+
+    apf_add_filter_req->program_len = program_len;
+    apf_add_filter_req->need_fw_copy = false;
+    if (aml_bus_type == SDIO_MODE) {
+        apf_add_filter_req->need_fw_copy = (program_len % 512 == 0) ? false :true;
+        if (apf_add_filter_req->need_fw_copy)
+        {
+            apf_add_filter_req->fw_copy_len = program_len % 512;
+            apf_add_filter_req->fw_copy_addr = aml_hw->apf_params.apf_cap.apf_mem_addr + align_size;
+        }
+    }
+    return aml_priv_send_msg(aml_hw, apf_add_filter_req, 0, 0, NULL);
+}
+
+/**
+ * aml_apf_delete_filter - Delete Android Packet Filter (APF) filter from hardware
+ * @aml_hw: Pointer to the AML hardware structure
+ *
+ * This function deletes the currently active APF filter from the hardware
+ * associated with the provided AML hardware structure.
+ *
+ * Return:
+ *   0 on success, or a negative error code on failure.
+ */
+int aml_apf_delete_filter(struct aml_hw *aml_hw, struct apf_pgm_status * apf_pgm_status)
+{
+    void * apf_delete_req;
+
+    apf_delete_req = aml_priv_msg_zalloc(MM_SUB_DELETE_APF_FILTER, 0);
+    if (!apf_delete_req)
+        return -ENOMEM;
+
+    return aml_priv_send_msg(aml_hw, apf_delete_req, 1, PRIV_APF_DELETE_PGM, &apf_pgm_status->apf_status);
+}
+
+/**
+ * aml_apf_read_filter_data - Read Android Packet Filter (APF) filter data from hardware
+ * @aml_hw: Pointer to the AML hardware structure
+ * @buf: Pointer to the buffer where the APF filter data will be stored
+ * @buf_len: Length of the buffer allocated for APF filter data
+ *
+ * This function reads the current APF filter data from the hardware associated
+ * with the provided AML hardware structure and stores it in the specified buffer.
+ * The caller must ensure that the buffer (@buf) is large enough to hold the
+ * requested data (@buf_len).
+ *
+ * Return:
+ *   None
+ */
+void aml_apf_read_filter_data(struct aml_hw *aml_hw, u8_l * buf, uint32_t buf_len)
+{
+    int i;
+    u8_l * src_addr;
+
+    if (aml_bus_type == USB_MODE) {
+        aml_hw->plat->hif_ops->hi_read_sram((unsigned char *)buf,
+            (unsigned char *)(SYS_TYPE)aml_hw->apf_params.apf_cap.apf_mem_addr,
+            buf_len, USB_EP4);
+    } else if (aml_bus_type == SDIO_MODE) {
+        aml_hw->plat->hif_sdio_ops->hi_random_ram_read((unsigned char *)buf,
+            (unsigned char *)(SYS_TYPE)aml_hw->apf_params.apf_cap.apf_mem_addr, buf_len);
+    } else{
+        src_addr = AML_ADDR(aml_hw->plat, AML_ADDR_CPU, aml_hw->apf_params.apf_cap.apf_mem_addr);
+        for (i = 0; i < buf_len; i++) {
+            *buf++ = *src_addr++;
+        }
+    }
+}
+
+/**
+ * aml_apf_set_mode - Function to set the APF (Android Packet Filter) mode on the AML hardware.
+ * @aml_hw: Pointer to the AML hardware structure.
+ * @apf_mode: Desired APF mode (enable/disable).
+ *
+ * This function allocates and sends a message to the AML hardware to set the APF mode.
+ * It initializes an APF set mode request structure, sets the APF mode, and sends the
+ * request message to the AML hardware.
+ */
+int aml_apf_set_mode(struct aml_hw *aml_hw, bool apf_mode)
+{
+    struct apf_set_mode_req * apf_set_mode_req;
+
+    apf_set_mode_req = aml_priv_msg_zalloc(MM_SUB_SET_APF_MODE, sizeof(struct apf_set_mode_req));
+    if (!apf_set_mode_req)
+        return -ENOMEM;
+
+    // Set the APF mode in the request structure
+    apf_set_mode_req->apf_mode = apf_mode;
+
+    return aml_priv_send_msg(aml_hw, apf_set_mode_req, 0, 0, NULL);
+}
+
+/**
+ * aml_apf_get_status - Retrieve the current APF status.
+ *
+ * Allocates a request message and sends it to retrieve the current APF status.
+ * If memory allocation fails, it returns an error.
+ *
+ * @aml_hw: Pointer to the hardware structure containing APF info.
+ *
+ * @return
+ *   0 on success, or -ENOMEM if memory allocation fails.
+ */
+int aml_apf_get_status(struct aml_hw *aml_hw)
+{
+    void *apf_req;
+
+    apf_req = aml_priv_msg_zalloc(MM_SUB_GET_APF_STATUS, 0);
+    if (!apf_req)
+        return -ENOMEM;
+
+    return aml_priv_send_msg(aml_hw, apf_req, 1, PRIV_APF_GET_STATUS, &aml_hw->apf_params.apf_info);
+}
+
+/**
+ * aml_set_early_suspend_mode - Set the early suspend mode for the hardware.
+ *
+ * Allocates a request message, sets the early suspend mode, and sends it to the firmware.
+ * If memory allocation fails, it returns an error.
+ *
+ * @aml_hw: Pointer to the hardware structure.
+ * @early_suspend_mode: True to enable early suspend, false to disable.
+ *
+ * @return
+ *   0 on success, or -ENOMEM if memory allocation fails.
+ */
+int aml_set_early_suspend_mode(struct aml_hw *aml_hw, bool early_suspend_mode)
+{
+    struct early_suspend_mode_req * early_suspend_mode_req;
+
+    early_suspend_mode_req = aml_priv_msg_zalloc(MM_SUB_SET_EARLY_SUSPEND_REQ, sizeof(struct early_suspend_mode_req));
+    if (!early_suspend_mode_req)
+        return -ENOMEM;
+
+    // Set the APF mode in the request structure
+    early_suspend_mode_req->early_suspend_mode = early_suspend_mode;
+
+    return aml_priv_send_msg(aml_hw, early_suspend_mode_req, 0, 0, NULL);
+}
+#endif /* CONFIG_AML_APF */

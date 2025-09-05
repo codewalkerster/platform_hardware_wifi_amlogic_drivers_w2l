@@ -1,9 +1,167 @@
-#ifndef DRI_TEST_CMD
+
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/#ifndef DRI_TEST_CMD
 #define DRI_TEST_CMD
 
 #include "fi_sdio.h"
 
 #define TSSI_5G_CAL_NUM 4
+
+typedef enum {
+    RF_TYPE_HIGH_PERFORMANCE = 0,
+    RF_TYPE_LOW_POWER,
+    RF_TYPE_UNREADY,
+    RF_TYPE_MAX,
+} RF_TYPE_ENUM;
+
+typedef enum {
+    BAND_2G = 0,
+    BAND_5G,
+    BAND_MAX,
+} E_BAND;
+
+typedef enum {
+    BW_20M = 0,
+    BW_40M,
+    BW_2G_MAX,
+    BW_80M = 2,
+    BW_5G_MAX,
+} E_RF_BW;
+
+typedef enum {
+    MODE_2G_20M = 0,
+    MODE_2G_40M,
+    MODE_5G_20M,
+    MODE_5G_40M,
+    MODE_5G_80M,
+    MODE_MAX,
+} E_MODE;
+
+typedef enum {
+    FREQ_BLK_5210 = 0,
+    FREQ_BLK_5290,
+    FREQ_BLK_5530,
+    FREQ_BLK_5610,
+    FREQ_BLK_5690,
+    FREQ_BLK_5775,
+    FREQ_BLK_MAX,
+} E_FREQBLOCK_5G;
+
+typedef enum {
+    SPUR_NONE = 0,
+    SPUR_5755,
+    SPUR_5765,
+    SPUR_5775,
+    SPUR_MAX
+} E_SPUR;
+
+typedef enum {
+    TBL_PHY_COMMON = 0,
+    TBL_PHY_BAND,
+    TBL_PHY_BW_2G,
+    TBL_PHY_BW_5G,
+    TBL_PHY_MODE,
+    TBL_RF_COMMON,
+    TBL_RF_BAND,
+    TBL_RF_BW_2G,
+    TBL_RF_BW_5G,
+    TBL_RF_MODE,
+    TBL_RF_FREQBLOCK,
+    TBL_RF_DYNAMIC,
+    TBL_SPUR,
+} E_TBL_TYPE;
+
+typedef struct {
+    unsigned int addr;
+    unsigned int val;
+} TBL_COMMON_T;
+
+typedef struct {
+    unsigned int addr;
+    unsigned int val[BAND_MAX];
+} TBL_BAND_T;
+
+typedef struct {
+    unsigned int addr;
+    unsigned int val[BW_2G_MAX];
+} TBL_BW_2G_T;
+
+typedef struct {
+    unsigned int addr;
+    unsigned int val[BW_5G_MAX];
+} TBL_BW_5G_T;
+
+typedef struct {
+    unsigned int addr;
+    unsigned int val[MODE_MAX];
+} TBL_MODE_T;
+
+typedef struct {
+    unsigned int addr;
+    unsigned int val[FREQ_BLK_MAX];
+} TBL_FREQBLOCK_T;
+
+typedef struct {
+    unsigned short freq_start;
+    unsigned short freq_end;
+    unsigned int addr;
+    unsigned int val_default;
+    unsigned int val_except;
+} TBL_DYNAMIC_T;
+
+typedef struct {
+    unsigned int addr;
+    unsigned int val[SPUR_MAX];
+} TBL_SPUR_T;
+
+typedef struct {
+    E_TBL_TYPE tbl_type;
+    void* p_tbl;
+    unsigned int tbl_len;
+} TBL_LIST_T;
+
+typedef struct {
+    unsigned int pa_gain;
+    unsigned int adb_dcib;
+    unsigned int adb_ed_gain;
+    unsigned int adb_cbank;
+    unsigned int mxr_gain;
+    unsigned int mxr_cbank;
+    unsigned int mxr_gaincal;
+    unsigned int dac_amp_ctrl;
+    unsigned int lpf_offset;
+    unsigned int slice_start_idx;
+    unsigned int tx_ex_gain;
+} TXPWR_2G_CFG_T;
+
+typedef struct {
+    unsigned char pa_gain;
+    unsigned char da_gain;
+    unsigned char da_fine_gain;
+    unsigned char dac_amp_ctrl;
+    unsigned char lpf_offset;
+    unsigned char slice_start_idx;
+    unsigned short tx_ex_gain;
+} TXPWR_5G_CFG_T;
+
+typedef struct {
+    unsigned short gain[4];
+} RXGAIN_CFG_T;
+
+typedef struct {
+    unsigned char dig_gain;
+    unsigned short rx_gain;
+    unsigned int ceva_gain;
+    unsigned char rf_att;
+    unsigned short in_gain;
+    unsigned short out_gain;
+} DPD_GAIN_CFG_T;
+
 
 typedef struct W2_EFUSE_PARAM
 {
@@ -174,29 +332,64 @@ typedef struct Cali_Param
     W2_EFUSE_PARAM w2_efuse_param;
 } Cali_Param;
 
+typedef struct rf_gain_setting_param
+{
+    unsigned int g_rf_cfg_type;
+    TXPWR_5G_CFG_T txpwr_5g_wf0[1][10];
+    TXPWR_5G_CFG_T txpwr_5g_wf1[1][10];
+    RXGAIN_CFG_T rxgain_5g[1][10];
+    DPD_GAIN_CFG_T dpd_gain_5g[1][8];
+} rf_gain_setting_param_t;
+
+typedef struct rf_cali_setting_param
+{
+    TBL_BAND_T rf_vcm_cfg_cali_tbl[1][4];
+    TBL_BAND_T rf_vcm_cfg_mimo_apply_tbl[1][4];
+    TBL_FREQBLOCK_T rf_pa_vgcg0_cfg_low_tbl[1][2];
+    TBL_FREQBLOCK_T rf_pa_vgcg0_cfg_normal_tbl[1][2];
+} rf_cali_setting_param_t;
+
+typedef struct phy_maskfilter_cfg_param
+{
+    uint32_t maskfilter[88];
+    uint32_t mask_bw_cfg[5];
+    unsigned char ofdm_power;
+} phy_maskfilter_cfg_param_t;
+
 typedef struct COUNTRY_PWR_LIMIT_CFG
 {
     unsigned char version;
     unsigned char country_pwr_limit_en;
+    unsigned char regdom_code;
+    //unsigned char wf2g_test[5];
 
-    unsigned char wf2g_11b_limit[4];
-    unsigned char wf2g_11g_limit[8];
-    unsigned char wf2g_ht20_limit[8];
-    unsigned char wf2g_ht40_limit[8];
-    unsigned char wf2g_vht20_limit[9];
-    unsigned char wf2g_vht40_limit[10];
-    unsigned char wf2g_he20_limit[12];
-    unsigned char wf2g_he40_limit[12];
+//2.4G
+    unsigned char wf2g_ofdm_limit[14][5];
+    unsigned char wf2g_dsss_limit[14][5];
 
-    unsigned char wf5g_11a_limit[8];
-    unsigned char wf5g_ht20_limit[8];
-    unsigned char wf5g_ht40_limit[8];
-    unsigned char wf5g_vht20_limit[9];
-    unsigned char wf5g_vht40_limit[10];
-    unsigned char wf5g_vht80_limit[10];
-    unsigned char wf5g_he20_limit[12];
-    unsigned char wf5g_he40_limit[12];
-    unsigned char wf5g_he80_limit[12];
+//5G 20M band0 ch36~ch64
+    unsigned char wf5g_bw20_band0[8][5];
+//5G 20M band1 ch100~ch144
+    unsigned char wf5g_bw20_band1[12][5];
+//5G 20M band2 ch149~ch177
+    unsigned char wf5g_bw20_band2[8][5];
+
+//5G 40M band0 ch38~ch62
+    unsigned char wf5g_bw40_band0[4][5];
+//5G 40M band1 ch102~ch142
+    unsigned char wf5g_bw40_band1[6][5];
+//5G 40M band2 ch151~ch175
+    unsigned char wf5g_bw40_band2[4][5];
+
+//5G 80M band0 ch42~ch58
+    unsigned char wf5g_bw80_band0[2][5];
+//5G 80M band1 ch106~ch138
+    unsigned char wf5g_bw80_band1[3][5];
+//5G 80M band3 ch155
+    unsigned char wf5g_bw80_band2[1][5];
+    //uint32_t maskfilter[2][88];
+    //uint32_t mask_bw_cfg[2][5];
+    phy_maskfilter_cfg_param_t phy_maskfilter_cfg[2];
 } COUNTRY_PWR_LIMIT_CFG;
 
 //================cmd=========================================
@@ -747,5 +940,11 @@ typedef union FI_CMDFIFO_PARAM
     struct Phy_Interface_Param phy_interface_cmd;
     struct PagelenCmd page_len_cmd;
 } FI_CMDFIFO_PARAM;
+
+struct rx_bw_nss_param {
+    unsigned char bw;
+    unsigned char nss;
+    unsigned char vif_idx;
+};
 
 #endif

@@ -1,3 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
 #ifndef _USB_COMMON_H_
 #define _USB_COMMON_H_
 
@@ -14,21 +21,6 @@
 #include "sdio_common.h"
 
 #define OS_LOCK spinlock_t
-
-#define PRINT(...)      do {printk("aml_usb_common->");printk( __VA_ARGS__ );}while(0)
-#ifndef ASSERT
-#define ASSERT(exp) do{    \
-                if (!(exp)) {   \
-                        printk("=>=>=>=>=>assert %s,%d\n",__func__,__LINE__);   \
-                        /*BUG();        while(1);   */  \
-                }                       \
-        } while (0);
-#endif
-
-#define ERROR_DEBUG_OUT(format,...) do {    \
-                 printk("FUNCTION: %s LINE: %d:"format"",__FUNCTION__, __LINE__, ##__VA_ARGS__); \
-        } while (0)
-
 
 extern struct mutex auc_usb_mutex;
 
@@ -57,9 +49,6 @@ extern struct mutex auc_usb_mutex;
 #define AML_USB_REQUEST_IN       ( USB_DIR_IN | AML_USB_REQUEST )
 #define AML_USB_REQUEST_OUT      ( USB_DIR_OUT | AML_USB_REQUEST )
 
-#define AML_SIG_CBW             0x43425355
-#define AML_XFER_TO_DEVICE      0
-#define AML_XFER_TO_HOST        0x80
 #define USB_MAX_TRANS_SIZE (64 * 1024)
 #define USB_CTRL_IN_REQTYPE (USB_DIR_IN | USB_TYPE_VENDOR | (USB_RECIP_ENDPOINT & 0x1f))
 #define USB_CTRL_OUT_REQTYPE (USB_DIR_OUT | USB_TYPE_VENDOR | (USB_RECIP_ENDPOINT & 0x1f))
@@ -116,11 +105,15 @@ struct aml_hwif_usb {
     struct amlw_hif_scatter_req *scat_req;
 };
 
+void aml_usb_set_bus_err(unsigned char bus_err);
+
+void auc_irq_urb_set(struct urb *urb);
+
 int aml_usb_insmod(void);
-struct urb * auc_alloc_urb(int iso_packets, gfp_t mem_flags);
+void aml_usb_rmmod(void);
+int aml_usb_reset(void);
 bool usb_bus_available(void);
 
 #define CHIP_FUNCTION_DISABLE_154 BIT(0)
-#define CHIP_FUNCTION_DISABLE_11AX BIT(1)
 
 #endif

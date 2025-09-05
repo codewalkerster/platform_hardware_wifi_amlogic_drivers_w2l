@@ -38,37 +38,44 @@
 #include "aml_platform.h"
 #endif
 #include "aml_scc.h"
-#include "aml_p2p.h"
 
-char sp_frame_status_trace[][25] = {
-    "[SP FRAME TX] ",
-    "[SP FRAME RX] ",
-    "[SP FRAME TX SUC] ",
-    "[SP FRAME TX FAIL] "
+const unsigned char BROADCAST_ADDRESS[MAC_ADDR_LEN] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+static const char *sp_frame_status_trace[] = {
+    [SP_STATUS_TX_START] = "[SP FRAME TX]",
+    [SP_STATUS_RX] = "[SP FRAME RX]",
+    [SP_STATUS_TX_SUC] = "[SP FRAME TX SUC]",
+    [SP_STATUS_TX_FAIL] = "[SP FRAME TX FAIL]",
 };
 
-/*Table 31-DPP Public Action Frame Type [easy connect v2.0]*/
-char dpp_pub_action_trace[][50] = {
-    "Authentication Request",
-    "Authentication Response",
-    "Authentication Confirm",
-    "Reserved",
-    "Reserved",
-    "Peer Discovery Request",
-    "Peer Discovery Response",
-    "PKEX Version 1 Exchange Request",
-    "PKEX Exchange Response",
-    "PKEX Commit-Reveal Request",
-    "PKEX Commit-Reveal Response",
-    "Configuration Result",
-    "Connection Status Result",
-    "Presence Announcement",
-    "Reconfiguration Announcement",
-    "Reconfiguration Authentication Request",
-    "Reconfiguration Authentication Response",
-    "Reconfiguration Authentication Confirm",
-    "PKEX Exchange Request"
-};
+static const char *dpp_pub_action_trace_name(int type)
+{
+   /*Table 31-DPP Public Action Frame Type [easy connect v2.0]*/
+   static const char *dpp_pub_action_trace[] = {
+       "Authentication Request",
+       "Authentication Response",
+       "Authentication Confirm",
+       "Reserved",
+       "Reserved",
+       "Peer Discovery Request",
+       "Peer Discovery Response",
+       "PKEX Version 1 Exchange Request",
+       "PKEX Exchange Response",
+       "PKEX Commit-Reveal Request",
+       "PKEX Commit-Reveal Response",
+       "Configuration Result",
+       "Connection Status Result",
+       "Presence Announcement",
+       "Reconfiguration Announcement",
+       "Reconfiguration Authentication Request",
+       "Reconfiguration Authentication Response",
+       "Reconfiguration Authentication Confirm",
+       "PKEX Exchange Request"
+   };
+
+   return type < ARRAY_SIZE(dpp_pub_action_trace) ? dpp_pub_action_trace[type] : "dpp_pub NULL";
+}
+
 
 /******************************************************************************
  * Power Save functions
@@ -124,7 +131,7 @@ void aml_set_traffic_status(struct aml_hw *aml_hw,
 void aml_ps_bh_enable(struct aml_hw *aml_hw, struct aml_sta *sta,
                        bool enable)
 {
-    struct aml_txq *txq;
+    struct aml_txq *txq = NULL;
 
     if (enable) {
         trace_ps_enable(sta);
@@ -203,13 +210,14 @@ void aml_ps_bh_traffic_req(struct aml_hw *aml_hw, struct aml_sta *sta,
                             u16 pkt_req, u8 ps_id)
 {
     int pkt_ready_all;
-    struct aml_txq *txq;
+    struct aml_txq *txq = NULL;
     u8 bcmc_mac[ETH_ALEN] = {0,};
 
     if (!sta)
         return;
     if (!sta->ps.active) {
-        WARN(memcmp(sta->mac_addr, bcmc_mac, ETH_ALEN), "sta %pM is not in Power Save mode", sta->mac_addr);
+        if (memcmp(sta->mac_addr, bcmc_mac, ETH_ALEN))
+            AML_ERR("sta %pM is not in Power Save mode", sta->mac_addr);
         return;
     }
 
@@ -251,7 +259,7 @@ void aml_ps_bh_traffic_req(struct aml_hw *aml_hw, struct aml_sta *sta,
             pkt_req = txq->credits;
         txq->push_limit = pkt_req;
         sta->ps.sp_cnt[ps_id] = pkt_req;
-        aml_txq_add_to_hw_list(txq);
+        aml_txq_start(txq, AML_TXQ_STOP_STA_PS);
     } else {
         int i, tid;
 
@@ -273,13 +281,13 @@ void aml_ps_bh_traffic_req(struct aml_hw *aml_hw, struct aml_sta *sta,
                 pkt_req -= txq_len;
                 txq->push_limit = txq_len;
                 sta->ps.sp_cnt[ps_id] += txq_len;
-                aml_txq_add_to_hw_list(txq);
+                aml_txq_start(txq, AML_TXQ_STOP_STA_PS);
             } else {
                 /* Enough pkt in this txq to complete the request
                    add this txq to hwq list and stop processing txq */
                 txq->push_limit = pkt_req;
                 sta->ps.sp_cnt[ps_id] += pkt_req;
-                aml_txq_add_to_hw_list(txq);
+                aml_txq_start(txq, AML_TXQ_STOP_STA_PS);
                 break;
             }
         }
@@ -304,10 +312,10 @@ static void aml_downgrade_ac(struct aml_sta *sta, struct sk_buff *skb)
 {
     int8_t ac = aml_tid2hwq[skb->priority];
 
-    if (WARN((ac > AML_HWQ_VO),
-             "Unexepcted ac %d for skb before downgrade", ac))
+    if (ac > AML_HWQ_VO) {
+        AML_ERR("Unexpected ac %d for skb before downgrade", ac);
         ac = AML_HWQ_VO;
-
+    }
     while (sta->acm & BIT(ac)) {
         if (ac == AML_HWQ_BK) {
             skb->priority = 1;
@@ -345,7 +353,7 @@ u16 aml_select_txq(struct aml_vif *aml_vif, struct sk_buff *skb)
     struct wireless_dev *wdev = &aml_vif->wdev;
     struct aml_sta *sta = NULL;
     struct aml_txq *txq;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0) && LINUX_VERSION_CODE <= KERNEL_VERSION(5, 10, 0))
     struct netdev_queue *netq;
     int queue_index = 0, count = 0;
     struct Qdisc *q;
@@ -379,6 +387,7 @@ u16 aml_select_txq(struct aml_vif *aml_vif, struct sk_buff *skb)
         /* AP_VLAN interface is not used for a 4A STA,
            fallback searching sta amongs all AP's clients */
         aml_vif = aml_vif->ap_vlan.master;
+        fallthrough;
     case NL80211_IFTYPE_AP:
     case NL80211_IFTYPE_P2P_GO:
     {
@@ -402,7 +411,7 @@ u16 aml_select_txq(struct aml_vif *aml_vif, struct sk_buff *skb)
     {
         struct ethhdr *eth = (struct ethhdr *)skb->data;
 
-        if (!aml_vif->is_resending) {
+        if (!aml_vif->is_re_sending) {
             /*
              * If ethernet source address is not the address of a mesh wireless interface, we are proxy for
              * this address and have to inform the HW
@@ -471,6 +480,10 @@ u16 aml_select_txq(struct aml_vif *aml_vif, struct sk_buff *skb)
         }
 
         txq = aml_txq_sta_get(sta, skb->priority, aml_hw);
+        if (txq == NULL) {
+            AML_RLMT_ERR("get txq fail!\n");
+            return NDEV_NO_TXQ;
+        }
         netdev_queue = txq->ndev_idx;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0) && LINUX_VERSION_CODE <= KERNEL_VERSION(5, 10, 0))
         queue_index = netdev_queue;
@@ -672,8 +685,8 @@ void aml_tx_push(struct aml_hw *aml_hw, struct aml_txhdr *txhdr, int flags)
         flags |= AML_PUSH_RETRY;
         txq->nb_retry--;
         if (txq->nb_retry == 0) {
-            WARN(skb != txq->last_retry_skb,
-                 "last retry buffer is not the expected one");
+            if (skb != txq->last_retry_skb)
+                AML_ERR("last retry buffer is not the expected one");
             txq->last_retry_skb = NULL;
         }
     } else if (!(flags & AML_PUSH_RETRY)) {
@@ -683,7 +696,8 @@ void aml_tx_push(struct aml_hw *aml_hw, struct aml_txhdr *txhdr, int flags)
 
 #ifdef CONFIG_AML_AMSDUS_TX
     if (txq->amsdu == sw_txhdr) {
-        WARN((flags & AML_PUSH_RETRY), "End A-MSDU on a retry");
+        if (flags & AML_PUSH_RETRY)
+            AML_ERR("End A-MSDU on a retry");
         aml_hw->stats->amsdus[sw_txhdr->amsdu.nb - 1].done++;
         txq->amsdu = NULL;
     } else if (!(flags & AML_PUSH_RETRY) &&
@@ -985,6 +999,7 @@ static bool aml_amsdu_add_subframe(struct aml_hw *aml_hw, struct sk_buff *skb,
        )
         return false;
 
+    AML_PROF_CNT(amsdu, 2);
     spin_lock_bh(&aml_hw->tx_lock);
     if (txq->amsdu) {
         /* aggregation already in progress, add this buffer if enough space
@@ -1069,6 +1084,7 @@ static bool aml_amsdu_add_subframe(struct aml_hw *aml_hw, struct sk_buff *skb,
 
   end:
     spin_unlock_bh(&aml_hw->tx_lock);
+    AML_PROF_CNT(amsdu, res ? 1 : 0);
     return res;
 }
 
@@ -1078,7 +1094,7 @@ static bool aml_amsdu_add_subframe(struct aml_hw *aml_hw, struct sk_buff *skb,
  * @aml_hw Driver main data
  * @sw_txhdr_main Software descriptor of the A-MSDU to dismantle.
  *
- * The a-mdsu is always fully dismantled (i.e don't try to reduce it's size to
+ * The a-mdsu is always fully dismantled (i.e don't try to reduce it is size to
  * fit the new limit).
  * The DMA mapping can be re-used as aml_amsdu_add_subframe_header ensure that
  * enough data in the skb bufer are 'DMA mapped'.
@@ -1089,7 +1105,6 @@ static void aml_amsdu_dismantle(struct aml_hw *aml_hw, struct aml_sw_txhdr *sw_t
 {
     struct aml_amsdu_txhdr *amsdu_txhdr, *next;
     struct sk_buff *skb_prev = sw_txhdr_main->skb;
-    struct aml_txq *txq =  sw_txhdr_main->txq;
     u32 tx_max_headroom = 0;
 
     trace_amsdu_dismantle(sw_txhdr_main);
@@ -1104,13 +1119,14 @@ static void aml_amsdu_dismantle(struct aml_hw *aml_hw, struct aml_sw_txhdr *sw_t
         struct sk_buff *skb = amsdu_txhdr->skb;
         struct aml_txhdr *txhdr;
         struct aml_usb_txhdr *usb_txhdr;
-        struct aml_sdio_txhdr *sdio_txhdr;
         struct aml_sw_txhdr *sw_txhdr;
         size_t frame_len;
         size_t data_oft;
+#ifdef SDIO_MODE_ON
+        struct aml_sdio_txhdr *sdio_txhdr;
         u8 hw_calc = 0;
         u8 is_frag = 0;
-
+#endif
         list_del(&amsdu_txhdr->list);
         if (aml_bus_type == USB_MODE) {
             tx_max_headroom = AML_USB_TX_HEADROOM;
@@ -1127,7 +1143,7 @@ static void aml_amsdu_dismantle(struct aml_hw *aml_hw, struct aml_sw_txhdr *sw_t
         if (aml_bus_type == PCIE_MODE) {
             if (unlikely((skb_headroom(skb) < AML_TX_HEADROOM)
                || (sw_txhdr == NULL) || (frame_len > amsdu_txhdr->ipc_data.size))) {
-                dev_err(aml_hw->dev, "Failed to dismantle A-MSDU\n");
+                AML_ERR("Failed to dismantle A-MSDU\n");
                 if (sw_txhdr)
                     kmem_cache_free(aml_hw->sw_txhdr_cache, sw_txhdr);
                 aml_ipc_buf_a2e_release(aml_hw, &amsdu_txhdr->ipc_data);
@@ -1137,7 +1153,7 @@ static void aml_amsdu_dismantle(struct aml_hw *aml_hw, struct aml_sw_txhdr *sw_t
             }
         } else {
             if (unlikely((skb_headroom(skb) < tx_max_headroom) || (sw_txhdr == NULL))) {
-                dev_err(aml_hw->dev, "Failed to dismantle A-MSDU\n");
+                AML_ERR("Failed to dismantle A-MSDU\n");
                 if (sw_txhdr)
                     kmem_cache_free(aml_hw->sw_txhdr_cache, sw_txhdr);
                 dev_kfree_skb_any(skb);
@@ -1155,21 +1171,26 @@ static void aml_amsdu_dismantle(struct aml_hw *aml_hw, struct aml_sw_txhdr *sw_t
            sw_txhdr->ipc_data = amsdu_txhdr->ipc_data; // It's OK to re-use amsdu_txhdr ptr
            sw_txhdr->desc.api.host.packet_addr[0] = sw_txhdr->ipc_data.dma_addr + data_oft;
         }
+
+#ifdef SDIO_MODE_ON
         if (aml_bus_type == SDIO_MODE)
             sdio_checksum_process(aml_hw, skb, &hw_calc, &is_frag);
+#endif
         sw_txhdr->desc.api.host.packet_len[0] = frame_len;
         sw_txhdr->desc.api.host.packet_cnt = 1;
         if (aml_bus_type == USB_MODE) {
             skb_pull(skb, sizeof(struct ethhdr));
             usb_txhdr = (struct aml_usb_txhdr *)skb_push(skb, AML_USB_TX_HEADROOM);
             usb_txhdr->sw_hdr = sw_txhdr;
-        } else if (aml_bus_type == SDIO_MODE) {
+        }
+#ifdef SDIO_MODE_ON
+        else if (aml_bus_type == SDIO_MODE) {
             skb_pull(skb, sizeof(struct ethhdr));
             sdio_txhdr = (struct aml_sdio_txhdr *)skb_push(skb, AML_SDIO_TX_HEADROOM);
             sdio_txhdr->sw_hdr = sw_txhdr;
-            sdio_txhdr->mpdu_buf_flag = 0;
-            sdio_txhdr->mpdu_buf_flag = HW_FIRST_MPDUBUF_FLAG|HW_LAST_MPDUBUF_FLAG|HW_FIRST_AGG_FLAG|HW_LAST_AGG_FLAG;
-            sdio_txhdr->mpdu_buf_flag |= HW_MPDU_LEN_SET(sw_txhdr->frame_len + SDIO_FRAME_TAIL_LEN);
+            sdio_txhdr->mpdu_buf_flag = HW_FIRST_MPDUBUF_FLAG | HW_LAST_MPDUBUF_FLAG |
+                                        HW_FIRST_AGG_FLAG | HW_LAST_AGG_FLAG |
+                                        HW_MPDU_LEN_SET(sw_txhdr->frame_len + SDIO_FRAME_TAIL_LEN);
             sdio_txhdr->cksum_flag = SDIO_TX_CKSUM_DATA_FLAG;
             if (hw_calc) {
                 sdio_txhdr->cksum_flag |= SDIO_TX_CKSUM_ENABLE;
@@ -1177,8 +1198,11 @@ static void aml_amsdu_dismantle(struct aml_hw *aml_hw, struct aml_sw_txhdr *sw_t
             if (is_frag) {
                 sdio_txhdr->cksum_flag |= SDIO_TX_CKSUM_FRAG_FLAG;
             }
+            /* coverity[overrun-buffer-arg] -- ignore*/
             memset(&sdio_txhdr->desc, 0, sizeof(struct txdesc_host) + AMSDU_LLC_LEN /*8 byte alignment*/);
-        } else {
+        }
+#endif
+        else {
             txhdr = (struct aml_txhdr *)skb_push(skb, AML_TX_HEADROOM);
             txhdr->sw_hdr = sw_txhdr;
         }
@@ -1189,7 +1213,6 @@ static void aml_amsdu_dismantle(struct aml_hw *aml_hw, struct aml_sw_txhdr *sw_t
         skb_prev = skb;
     }
 }
-
 
 /**
  * aml_amsdu_update_len - Update length allowed for A-MSDU on a TXQ
@@ -1261,98 +1284,118 @@ static void aml_amsdu_update_len(struct aml_hw *aml_hw, struct aml_txq *txq,
 }
 #endif /* CONFIG_AML_AMSDUS_TX */
 
-bool aml_filter_sp_data_frame(struct sk_buff *skb, struct aml_vif *aml_vif, AML_SP_STATUS_E sp_status)
+u32 aml_filter_sp_data_frame(const u8 *frame, int len, const struct aml_vif *aml_vif,
+                             AML_SP_STATUS_E sp_status)
 {
-    struct ethhdr *ethhdr = (struct ethhdr *)skb->data;
-    struct udphdr *udphdr;
-    unsigned char iphdrlen = 0;
-    struct iphdr *iphdr;
-    struct ipv6hdr *ipv6hdr;
-    bool is_dhcpv4;
-    bool is_dhcpv6;
-    u8 str[200];
-    u32 offset = 0;
-    u8 *p = str;
+    static const struct aml_vif vif_dummy = { .vif_index = 0x1f /* magic vif index */ };
+
+    const struct ethhdr *ethhdr = NULL;
+    const void *nethdr;
+    u8 net_prot = 0;
+    u32 pkt_types = 0;
+
+    if (!aml_vif)
+        aml_vif = &vif_dummy;
+
+    if (!frame)
+        return pkt_types;
+
+    ethhdr = (const struct ethhdr *)frame;
 
     //filter eapol
     if (ethhdr->h_proto == htons(ETH_P_PAE)) {
-        offset += sprintf(p + offset, sp_frame_status_trace[sp_status]);
-        offset += sprintf(p + offset, "eapol,vif_idx:%d",aml_vif->vif_index);
-        AML_INFO("%s\n", p);
-        return true;
+        AML_WARN("%s[%d] EAPOL\n", sp_frame_status_trace[sp_status], aml_vif->vif_index);
+        return BIT(AML_PKT_EAPOL);
     }
 
     //filter arp
     if (ethhdr->h_proto == htons(ETH_P_ARP)) {
-        u16 op = (*(skb->data + ETH_HDR_LEN + 6) << 8) | (*(skb->data + ETH_HDR_LEN + 7));
-        u8 *sender_mac = skb->data + ETH_HDR_LEN + 8;
-        u8 *sender_ip = skb->data + ETH_HDR_LEN + 14;
-        u8 *target_mac = skb->data + ETH_HDR_LEN + 18;
-        u8 *target_ip = skb->data + ETH_HDR_LEN + 24;
+        const struct arphdr *arphdr = (const void *)(ethhdr + 1);
+        const struct {  /* Ethernet ARP payload */
+            unsigned char sha[ETH_ALEN]; /* sender hardware address  */
+            unsigned char sip[4];        /* sender IP address        */
+            unsigned char tha[ETH_ALEN]; /* target hardware address  */
+            unsigned char tip[4];        /* target IP address        */
+        } *ar = (const void *)(arphdr + 1);
 
-        offset += sprintf(p + offset, sp_frame_status_trace[sp_status]);
+        const u16 op = ntohs(arphdr->ar_op);
+        const char *op_name = "???";
 
-        if (op == 1) {
-            offset += sprintf(p + offset, "arp req,vif_idx:%d ", aml_vif->vif_index);
-        }
-        else if (op == 2) {
-            offset += sprintf(p + offset, "arp rsp,vif_idx:%d ", aml_vif->vif_index);
-        }
-        else {
-            offset += sprintf(p + offset, "arp unknown:%x,vif_idx:%d ", op, aml_vif->vif_index);
+        pkt_types |= BIT(AML_PKT_ARP);
+        switch (op) {
+        case ARPOP_REQUEST:
+            pkt_types |= BIT(AML_PKT_ARP_REQ);
+            op_name = "req";
+            break;
+        case ARPOP_REPLY:
+            pkt_types |= BIT(AML_PKT_ARP_REPLY);
+            op_name = "rsp";
+            break;
+        default:
+            op_name = "???";
+            break;
         }
 
-        offset += sprintf(p + offset, "sender:[%pM %pI4] receiver:[%pM %pI4]", sender_mac, sender_ip, target_mac, target_ip);
-
-        if (((sp_status == SP_STATUS_RX) && (!memcmp(target_ip, &aml_vif->ipv4_addr, IPV4_ADDR_LEN)))
-            || (sp_status != SP_STATUS_RX))
-            AML_INFO("%s\n", p);
-
-        if (aml_vif->wdev.iftype == NL80211_IFTYPE_AP) {
-            return false; // Solving the compatibility problem between w2 softap and mtk
+        if (aml_vif == &vif_dummy || sp_status != SP_STATUS_RX ||
+            aml_vif->vif_index != AML_STA_VIF_IDX ||
+            memcmp(ar->tip, &aml_vif->ipv4_addr, IPV4_ADDR_LEN) == 0) {
+            AML_WARN("%s[%d] ARP %s(0x%x) sender:[%pM %pI4] receiver:[%pM %pI4]\n",
+                    sp_frame_status_trace[sp_status], aml_vif->vif_index, op_name, op,
+                    ar->sha, ar->sip, ar->tha, ar->tip);
         }
-        else {
-            return true;
-        }
+        return pkt_types;
     }
 
     //filter dhcp
     if (ethhdr->h_proto == htons(ETH_P_IPV6)) {
-        ipv6hdr = (struct ipv6hdr *)(skb->data + ETH_HDR_LEN);
-        /* check for udp header */
-        if (ipv6hdr->nexthdr != IPPROTO_UDP)
-            return false;
-        iphdrlen = sizeof(*ipv6hdr);
+        const struct ipv6hdr *ipv6hdr = (const struct ipv6hdr *)(ethhdr + 1);
+
+        pkt_types |= BIT(AML_PKT_IPV6);
+        net_prot = ipv6hdr->nexthdr;
+        nethdr = (const void *)(ipv6hdr + 1);
     } else if (ethhdr->h_proto == htons(ETH_P_IP)) {
-        iphdr = (struct iphdr *)(skb->data + ETH_HDR_LEN);
-        /* check for udp header */
-        if (iphdr->protocol != IPPROTO_UDP)
-            return false;
-        iphdrlen = iphdr->ihl * 4;
+        const struct iphdr *iphdr = (const struct iphdr *)(ethhdr + 1);
+
+        pkt_types |= BIT(AML_PKT_IP);
+        net_prot = iphdr->protocol;
+        nethdr = (const void *)iphdr + (iphdr->ihl << 2);
     } else {
-        return false;
+        return pkt_types;
     }
-    udphdr = (struct udphdr *)(skb->data + ETH_HDR_LEN + iphdrlen);
-    if (ethhdr->h_proto == htons(ETH_P_IP) || ethhdr->h_proto == htons(ETH_P_IPV6)) {
-        is_dhcpv4 = ((ethhdr->h_proto == htons(ETH_P_IP)) &&
-                     ((udphdr->source == htons(DHCP_SP_V4)) || (udphdr->source == htons(DHCP_CP_V4))));
-        is_dhcpv6 = ((ethhdr->h_proto == htons(ETH_P_IPV6)) &&
-                     ((udphdr->source == htons(DHCP_SP_V6)) || (udphdr->source == htons(DHCP_CP_V6))));
-        if (is_dhcpv4 || is_dhcpv6) {
-            offset += sprintf(p + offset, sp_frame_status_trace[sp_status]);
-            offset += sprintf(p + offset, "DHCP[%d %d], vif_idx:%d", is_dhcpv4,is_dhcpv6, aml_vif->vif_index);
-            AML_INFO("%s\n", p);
-            return true;
-        }
+
+    switch (net_prot) {
+    case IPPROTO_ICMP:
+        pkt_types |= BIT(AML_PKT_ICMP);
+        break;
+    case IPPROTO_TCP:
+        pkt_types |= BIT(AML_PKT_TCP);
+        if (aml_filter_rtsp_frame(aml_vif, len, frame, sp_status))
+            pkt_types |= BIT(AML_PKT_RTSP);
+        break;
+    case IPPROTO_UDP: {
+        u16 sport = ntohs(((const struct udphdr *)nethdr)->source);
+
+        pkt_types |= BIT(AML_PKT_UDP);
+        if ((pkt_types & BIT(AML_PKT_IP)) && (sport == DHCP_SP_V4 || sport == DHCP_CP_V4))
+            pkt_types |= BIT(AML_PKT_DHCP);
+        if ((pkt_types & BIT(AML_PKT_IPV6)) && (sport == DHCP_SP_V6 || sport == DHCP_CP_V6))
+            pkt_types |= BIT(AML_PKT_DHCP_V6);
+        if (pkt_types & (BIT(AML_PKT_DHCP) | BIT(AML_PKT_DHCP_V6)))
+            AML_WARN("%s[%d] DHCP%s\n", sp_frame_status_trace[sp_status], aml_vif->vif_index,
+                     (pkt_types & BIT(AML_PKT_DHCP_V6)) ? "v6" : "");
+        break;
     }
-    return false;
+    default:
+        break;
+    }
+    return pkt_types;
 }
 
 uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E sp_status, u32 frame_len, u32* len_diff, u64 cookie)
 {
     u32 offset = 0;
     u32 subtype = ((*buf) & IEEE80211_FCTL_STYPE) >> 4;
-    u8 str[80];
+    u8 str[140];
     u8 *p = str;
     u8 category;
     u8 action_code;
@@ -1375,10 +1418,10 @@ uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E 
                     && (*(buf + OUI_OFFSET + 2) == 0x9a))
                 {
                     if (oui_type == OUI_TYPE_P2P) {
-                        offset += sprintf(p + offset, "PUB ACT->%s ", p2p_pub_action_trace[oui_subtype]);
+                        offset += snprintf(p + offset, sizeof(str) - offset, "PUB ACT->%32s ", p2p_pub_action_trace_name(oui_subtype));
 
                         if (cookie) {
-                            offset += sprintf(p + offset, " 0x%llx ", cookie);
+                            offset += snprintf(p + offset, sizeof(str) - offset, " 0x%llx ", cookie);
                         }
 
                         ret |= AML_P2P_ACTION_FRAME;
@@ -1420,14 +1463,14 @@ uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E 
                                     struct cfg80211_chan_def target_chdef;
                                     target_chdef = vif->aml_hw->chanctx_table[sta_vif->ch_index].chan_def;
                                     if ((target_chdef.chan->flags & IEEE80211_CHAN_RADAR)) {
-                                        AML_INFO("dfs chan, skip change ie");
+                                        AML_WARN("dfs chan, skip change ie");
                                     }
                                     else {
                                         if (frame_len > MAX_P2P_SAVE_LEN) {
-                                            AML_INFO("[P2P SCC] p2p frame len error:%d", frame_len);
+                                            AML_WARN("[P2P SCC] p2p frame len error:%d", frame_len);
                                         }
-                                        else if (g_scc_p2p_len_before){
-                                            AML_INFO("[P2P SCC] p2p pre frame not cfm:%d", g_scc_p2p_len_before);
+                                        else if (g_scc_p2p_len_before) {
+                                            AML_WARN("[P2P SCC] p2p pre frame not cfm:%d", g_scc_p2p_len_before);
                                         }
                                         else {
                                             AML_RLMT_WARN("[P2P SCC] p2p channel to:%d", aml_ieee80211_freq_to_chan(target_chdef.chan->center_freq, target_chdef.chan->band));
@@ -1455,9 +1498,11 @@ uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E 
 #endif
                     }
                     else if (oui_type == OUI_TYPE_DPP) {
-                            u8 dpp_action_subtype = *(buf + DPP_PUBLIC_ACTION_SUBTYPE_OFFSET);
-                            offset += sprintf(p + offset, "DPP ACTION->%s ", dpp_pub_action_trace[dpp_action_subtype]);
-                            ret |= AML_SP_FRAME | AML_DPP_ACTION_FRAME;
+                        u8 dpp_action_subtype = *(buf + DPP_PUBLIC_ACTION_SUBTYPE_OFFSET);
+                        offset += sprintf(p + offset, "DPP ACTION->%64s ", dpp_pub_action_trace_name(dpp_action_subtype));
+                        ret |= AML_SP_FRAME | AML_DPP_ACTION_FRAME;
+                        if (dpp_action_subtype == ACTION_DPP_CONNECT_STATUS_RESULT)
+                            ret |= AML_DPP_CONNECT_STATUS_RESULT_FRAME;
                     }
                     else {
                         offset += sprintf(p + offset, "oui type:%d ", oui_type);
@@ -1488,23 +1533,24 @@ uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E 
                             }
                 }
                 else if (action_code == WLAN_PUB_ACTION_EXT_CHANSW_ANN) {
+                    struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *)buf;
                     ret |= AML_CSA_ACTION_FRAME;
-                    offset += sprintf(p + offset, "CSA ACTION", action_code);
+                    offset += snprintf(p + offset,sizeof(str) - offset, "csa action, da:%pM", mgmt->da);
                 }
                 else {
-                    offset += sprintf(p + offset, "action code:%d ", action_code);
+                    offset += snprintf(p + offset,sizeof(str) - offset, "action code:%d ", action_code);
                 }
                 p[offset] = '\0';
-                AML_INFO("%s\n", p);
+                AML_WARN("%s\n", p);
             }
             else if ((category == VENDOR_SPEC)
                     && (*(buf + CATEGORY_OFFSET + 1) == 0x50)
                     && (*(buf + CATEGORY_OFFSET + 2) == 0x6f)
                     && (*(buf + CATEGORY_OFFSET + 3) == 0x9a)) {
                 oui_subtype = *(buf + CATEGORY_OFFSET + 5);
-                offset += sprintf(p + offset, "P2P ACTION->%s ", p2p_action_trace[oui_subtype]);
+                offset += sprintf(p + offset, "P2P ACTION->%32s ", p2p_action_trace_name(oui_subtype));
                 p[offset] = '\0';
-                AML_INFO("%s\n", p);
+                AML_WARN("%s\n", p);
             }
             return ret;
         }
@@ -1514,19 +1560,20 @@ uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E 
             offset += sprintf(p + offset, sp_frame_status_trace[sp_status]);
             offset += sprintf(p + offset, "vif:%d, auth algo:%d ", vif->vif_index, auth_algo);
             p[offset] = '\0';
-            AML_INFO("%s\n", p);
+            AML_WARN("%s\n", p);
             if ((AML_VIF_TYPE(vif) == NL80211_IFTYPE_STATION) && (vif->sta.flags & AML_STA_EXT_AUTH)) {
                 u8 *data = buf + AUTH_ALGO_OFFSET;
                 vif->sta.auth_status = (*(data + 4) | *(data + 5) << 8);
-                printk("auth status %d\n", vif->sta.auth_status);
+                AML_WARN("auth status %d\n", vif->sta.auth_status);
             }
             return ret;
         }
         case ASSOC_RSP_TYPE: {
+            ret |= AML_SP_FRAME;
             offset += sprintf(p + offset, sp_frame_status_trace[sp_status]);
             offset += sprintf(p + offset, "vif:%d, ASSOC_RSP", vif->vif_index);
             p[offset] = '\0';
-            AML_INFO("%s\n", p);
+            AML_WARN("%s\n", p);
             return ret;
         }
         case PROBE_RSP_TYPE: {
@@ -1534,7 +1581,7 @@ uint32_t aml_filter_sp_mgmt_frame(struct aml_vif *vif, u8 *buf, AML_SP_STATUS_E 
                 aml_scc_save_probe_rsp(vif, (u8*)buf, frame_len);
             }
 
-            if (vif->vif_index == AML_P2P_DEVICE_VIF_IDX) {
+            if ((vif->vif_index == AML_P2P_DEVICE_VIF_IDX) && (sp_status == SP_STATUS_TX_START)) {
                 if (aml_get_p2p_ie_offset(buf, frame_len, MAC_SHORT_MAC_HDR_LEN + PROBE_RSP_HDR_LEN)) {
                     vif->aml_hw->wfd_present = true;
                 }
@@ -1644,14 +1691,14 @@ netdev_tx_t aml_start_xmit(struct sk_buff *skb, struct net_device *dev)
     struct aml_plat *aml_plat = aml_hw->plat;
 #endif
     struct aml_usb_txhdr *usb_txhdr;
-    bool sp_frame = false;
+    u32 sp_frame = 0;
     u8 hw_calc = 0;
     u8 is_frag = 0;
 
     sk_pacing_shift_update(skb->sk, aml_hw->tcp_pacing_shift);
     if (aml_bus_type == PCIE_MODE) {
         tx_max_headroom = AML_TX_MAX_HEADROOM;
-    } else if (aml_bus_type == USB_MODE){
+    } else if (aml_bus_type == USB_MODE) {
         tx_max_headroom = AML_USB_TX_MAX_HEADROOM;
     } else {
         tx_max_headroom = AML_SDIO_TX_MAX_HEADROOM;
@@ -1680,8 +1727,10 @@ netdev_tx_t aml_start_xmit(struct sk_buff *skb, struct net_device *dev)
         dev_kfree_skb_any(skb);
         skb = newskb;
     }
+#ifdef SDIO_MODE_ON
     if (aml_bus_type == SDIO_MODE)
         sdio_checksum_process(aml_hw, skb, &hw_calc, &is_frag);
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)
     aml_pkt_orphan_partial(skb, aml_hw->tsq);
@@ -1698,13 +1747,22 @@ netdev_tx_t aml_start_xmit(struct sk_buff *skb, struct net_device *dev)
      * filer special frame,reuse TXU_CNTRL_MESH_FWD
      * TBD,use own flag in next rom version
      */
-    if (aml_filter_sp_data_frame(skb, aml_vif, SP_STATUS_TX_START)) {
-        sp_frame = true;
-        txq = aml_txq_sta_get(sta, tid, aml_hw);
-        //tid = 0xff;
-    } else {
-        txq = aml_txq_sta_get(sta, tid, aml_hw);
+    sp_frame = aml_filter_sp_data_frame(skb->data, skb->len, aml_vif, SP_STATUS_TX_START)
+                      & AML_PKT_SP_TX;
+    if (sp_frame & BIT(AML_PKT_ARP)) {
+        // Solving the compatibility problem between w2 softap and mtk
+        if (aml_vif->wdev.iftype == NL80211_IFTYPE_AP)
+            sp_frame = 0;
+    } else if (sp_frame & BIT(AML_PKT_ICMP)) {
+        extern bool pt_mode;
+
+        if (pt_mode)
+            sp_frame = 0;   /* skip if product test mode */
     }
+
+    txq = aml_txq_sta_get(sta, tid, aml_hw);
+    if (txq == NULL)
+        goto free;
 
     if (txq->idx == TXQ_INACTIVE)
         goto free;
@@ -1760,7 +1818,7 @@ netdev_tx_t aml_start_xmit(struct sk_buff *skb, struct net_device *dev)
     }
 
     if ((aml_vif->wdev.iftype == NL80211_IFTYPE_MESH_POINT) &&
-        (aml_vif->is_resending)) {
+        (aml_vif->is_re_sending)) {
         desc->host.flags |= TXU_CNTRL_MESH_FWD;
     }
 
@@ -1782,9 +1840,9 @@ netdev_tx_t aml_start_xmit(struct sk_buff *skb, struct net_device *dev)
             skb_pull(skb, sizeof(struct ethhdr));
             sdio_txhdr = (struct aml_sdio_txhdr *)skb_push(skb, AML_SDIO_TX_HEADROOM);
             sdio_txhdr->sw_hdr = sw_txhdr;
-            sdio_txhdr->mpdu_buf_flag = 0;
-            sdio_txhdr->mpdu_buf_flag = HW_FIRST_MPDUBUF_FLAG|HW_LAST_MPDUBUF_FLAG|HW_FIRST_AGG_FLAG|HW_LAST_AGG_FLAG;
-            sdio_txhdr->mpdu_buf_flag |= HW_MPDU_LEN_SET(sw_txhdr->frame_len + SDIO_FRAME_TAIL_LEN);
+            sdio_txhdr->mpdu_buf_flag = HW_FIRST_MPDUBUF_FLAG | HW_LAST_MPDUBUF_FLAG |
+                                        HW_FIRST_AGG_FLAG | HW_LAST_AGG_FLAG |
+                                        HW_MPDU_LEN_SET(sw_txhdr->frame_len + SDIO_FRAME_TAIL_LEN);
 
             sdio_txhdr->cksum_flag = SDIO_TX_CKSUM_DATA_FLAG;
             if (hw_calc) {
@@ -1803,6 +1861,7 @@ netdev_tx_t aml_start_xmit(struct sk_buff *skb, struct net_device *dev)
     }
 
     /* queue the buffer */
+    AML_PROF_CNT(xmit, skb->len);
     spin_lock_bh(&aml_hw->tx_lock);
 
     if (txq->idx == TXQ_INACTIVE ) {
@@ -1818,6 +1877,7 @@ netdev_tx_t aml_start_xmit(struct sk_buff *skb, struct net_device *dev)
         aml_hwq_process(aml_hw, txq->hwq);
     }
     spin_unlock_bh(&aml_hw->tx_lock);
+    AML_PROF_CNT(xmit, 0);
 
     return NETDEV_TX_OK;
 
@@ -1861,16 +1921,21 @@ int aml_start_mgmt_xmit(struct aml_vif *vif, struct aml_sta *sta,
     u32 sp_mgmt_ret;
     frame_len = params->len;
 
+#ifdef CONFIG_AML_RECOVERY
+    if ((aml_recy != NULL && aml_recy_flags_chk(AML_RECY_IPC_ONGOING | AML_RECY_DROP_XMIT_PKT))
+        || (aml_hw->state != WIFI_SUSPEND_STATE_NONE)) {
+        return -ENOMEM;
+    }
+#endif
+
     /* Set TID and Queues indexes */
     if (sta) {
         txq = aml_txq_sta_get(sta, 8, aml_hw);
+        if (txq == NULL)
+            return -EBUSY;
     } else {
         if (offchan) {
-#ifdef CONFIG_AML_PREALLOC_BUF_STATIC
-            txq = aml_hw->txq + NX_OFF_CHAN_TXQ_IDX;
-#else
             txq = &aml_hw->txq[NX_OFF_CHAN_TXQ_IDX];
-#endif
         } else {
             txq = aml_txq_vif_get(vif, NX_UNK_TXQ_TYPE);
         }
@@ -1878,7 +1943,7 @@ int aml_start_mgmt_xmit(struct aml_vif *vif, struct aml_sta *sta,
 
     if (aml_bus_type == PCIE_MODE) {
         tx_headroom = AML_TX_HEADROOM;
-    } else if (aml_bus_type == USB_MODE){
+    } else if (aml_bus_type == USB_MODE) {
         tx_headroom = AML_USB_TX_HEADROOM;
     } else {
         tx_headroom = AML_SDIO_TX_HEADROOM - AMSDU_LLC_LEN;
@@ -1895,12 +1960,6 @@ int aml_start_mgmt_xmit(struct aml_vif *vif, struct aml_sta *sta,
         dev_kfree_skb(skb);
         return -ENOMEM;
     }
-#ifdef CONFIG_AML_RECOVERY
-    if (aml_recy != NULL && aml_recy_flags_chk(AML_RECY_IPC_ONGOING | AML_RECY_DROP_XMIT_PKT)) {
-        dev_kfree_skb(skb);
-        return -ENOMEM;
-    }
-#endif
 
     /* Reserve headroom in skb. Do this so that we can easily re-use ieee80211
        functions that take skb with 802.11 frame as parameter */
@@ -1910,19 +1969,18 @@ int aml_start_mgmt_xmit(struct aml_vif *vif, struct aml_sta *sta,
     /* Copy data in skb buffer */
     data = skb_put(skb, frame_len);
     memcpy(data, params->buf, frame_len);
-    sp_mgmt_ret = aml_filter_sp_mgmt_frame(vif, data, SP_STATUS_TX_START, frame_len, &len_diff, (u64)skb);
+    sp_mgmt_ret = aml_filter_sp_mgmt_frame(vif, data, SP_STATUS_TX_START, frame_len, &len_diff, (uintptr_t)skb);
+
     if ((sp_mgmt_ret & AML_DPP_ACTION_FRAME) && offchan) {
-#ifdef CONFIG_AML_PREALLOC_BUF_STATIC
-        txq = aml_hw->txq + NX_OFF_CHAN_TXQ_IDX;
-#else
         txq = &aml_hw->txq[NX_OFF_CHAN_TXQ_IDX];
-#endif
         AML_INFO("DPP change txq ---> off chan");
     }
+
     if (len_diff) {
         AML_INFO("[P2P SCC] frame_len:%d frame_len_diff:%d", frame_len, len_diff);
         frame_len -= len_diff;
     }
+
     robust = ieee80211_is_robust_mgmt_frame(skb);
 
     /* Update CSA counter if present */
@@ -1958,6 +2016,7 @@ int aml_start_mgmt_xmit(struct aml_vif *vif, struct aml_sta *sta,
                 g_scc_p2p_len_before = 0;
 #endif
             cfg80211_mgmt_tx_status(&(vif->wdev), *cookie, params->buf, params->len, 0, GFP_ATOMIC);
+            /* coverity[leaked_storage] - variable "sw_txhdr" was free in kmem_cache_free */
             return 0;
         }
         /* coverity[leaked_storage] - variable "sw_txhdr" was free in kmem_cache_free */
@@ -1970,15 +2029,23 @@ int aml_start_mgmt_xmit(struct aml_vif *vif, struct aml_sta *sta,
     desc->host.vif_idx = vif->vif_index;
     desc->host.tid = 0xFF;
     desc->host.flags = TXU_CNTRL_MGMT;
+
     if (sp_mgmt_ret & AML_SP_FRAME) {
         desc->host.flags |= TXU_CNTRL_SP_FRAME;
     }
 
-    if (robust)
+    if (robust) {
         desc->host.flags |= TXU_CNTRL_MGMT_ROBUST;
+    }
 
-    if (params->no_cck)
+    if ((params->dont_wait_for_ack) ||
+        (is_multicast_ether_addr(ieee80211_get_DA((struct ieee80211_hdr *)params->buf)))) {
+        memcpy(desc->host.eth_dest_addr.array, BROADCAST_ADDRESS, ETH_ALEN);
+    }
+
+    if (params->no_cck) {
         desc->host.flags |= TXU_CNTRL_MGMT_NO_CCK;
+    }
 
     if (aml_bus_type == PCIE_MODE) {
         /* store Tx info in skb headroom */
@@ -1992,9 +2059,9 @@ int aml_start_mgmt_xmit(struct aml_vif *vif, struct aml_sta *sta,
         } else {
             sdio_txhdr = (struct aml_sdio_txhdr *)skb_push(skb, tx_headroom);
             sdio_txhdr->sw_hdr = sw_txhdr;
-            sdio_txhdr->mpdu_buf_flag = 0;
-            sdio_txhdr->mpdu_buf_flag = HW_FIRST_MPDUBUF_FLAG|HW_LAST_MPDUBUF_FLAG|HW_FIRST_AGG_FLAG|HW_LAST_AGG_FLAG;
-            sdio_txhdr->mpdu_buf_flag |= HW_MPDU_LEN_SET(sw_txhdr->frame_len + SDIO_FRAME_TAIL_LEN);
+            sdio_txhdr->mpdu_buf_flag = HW_FIRST_MPDUBUF_FLAG | HW_LAST_MPDUBUF_FLAG |
+                                        HW_FIRST_AGG_FLAG | HW_LAST_AGG_FLAG |
+                                        HW_MPDU_LEN_SET(sw_txhdr->frame_len + SDIO_FRAME_TAIL_LEN);
             sdio_txhdr->cksum_flag = 0;
             memset(&sdio_txhdr->desc, 0, sizeof(struct txdesc_host)/*8 byte alignment*/);
         }
@@ -2060,7 +2127,9 @@ int aml_update_tx_cfm(void *pthis)
 
         if (ret)
             AML_RLMT_ERR("usb bulk failed actual len is %d\n",actual_length);
-    } else if (aml_bus_type == SDIO_MODE) {
+    }
+#ifdef SDIO_MODE_ON
+else if (aml_bus_type == SDIO_MODE) {
 #ifdef CONFIG_SDIO_TX_ENH
         if (aml_hw->txcfm_param.dyn_en) {
             uint32_t pushed_occupy_blk = 0;
@@ -2095,6 +2164,7 @@ int aml_update_tx_cfm(void *pthis)
             (unsigned char *)SRAM_TXCFM_START_ADDR, sizeof(struct w2l_tx_sdio_usb_cfm_tag) * SRAM_TXCFM_CNT);
 #endif
     }
+#endif
 
     up(&aml_hw->aml_txcfm_sem);
     return 0;
@@ -2102,7 +2172,8 @@ int aml_update_tx_cfm(void *pthis)
 
 
 #ifdef CONFIG_SDIO_TX_ENH
-void txcfm_analyze_handler(struct aml_hw *aml_hw, uint32_t cur_tags, uint32_t pre_tags, uint32_t txcfm_idx)
+static void txcfm_analyze_handler(struct aml_hw *aml_hw,
+                                  uint32_t cur_tags, uint32_t pre_tags, uint32_t txcfm_idx)
 {
     uint32_t relative_idx = (txcfm_idx + 1) % TAGS_IN_SDIO_BLK;
     uint32_t cur_blk_idx = (txcfm_idx) / TAGS_IN_SDIO_BLK;
@@ -2176,6 +2247,30 @@ void txcfm_analyze_handler(struct aml_hw *aml_hw, uint32_t cur_tags, uint32_t pr
 }
 #endif
 
+void aml_pkt_mgmt_txstatus(struct aml_vif *vif, struct ieee80211_mgmt *mgmt, bool tx_suc)
+{
+    char prefix[20] = {0};
+    char tx_status[6] = {0};
+
+    snprintf(prefix, sizeof(prefix), "[SP FRAME TXS][%d]", vif->vif_index);
+    snprintf(tx_status, sizeof(tx_status), "%s", tx_suc ? "SUC" : "FAIL");
+
+    if (ieee80211_is_auth(mgmt->frame_control))
+        AML_WARN("%s AUTH %s\n", prefix, tx_status);
+    else if (ieee80211_is_assoc_req(mgmt->frame_control))
+        AML_WARN("%s ASSOC REQ %s\n", prefix, tx_status);
+    else if (ieee80211_is_reassoc_req(mgmt->frame_control))
+        AML_WARN("%s REASSOC REQ %s\n", prefix, tx_status);
+    else if (ieee80211_is_assoc_resp(mgmt->frame_control))
+        AML_WARN("%s ASSOC RESP %s\n", prefix, tx_status);
+    else if (ieee80211_is_reassoc_resp(mgmt->frame_control))
+        AML_WARN("%s REASSOC RESP %s\n", prefix, tx_status);
+    else if (ieee80211_is_deauth(mgmt->frame_control))
+        AML_WARN("%s DEAUTH %s\n", prefix, tx_status);
+    else if (ieee80211_is_disassoc(mgmt->frame_control))
+        AML_WARN("%s DISASSOC %s\n", prefix, tx_status);
+}
+
 int aml_tx_cfm_task(void *data)
 {
     struct aml_hw *aml_hw = (struct aml_hw *)data;
@@ -2188,17 +2283,16 @@ int aml_tx_cfm_task(void *data)
     struct w2l_tx_sdio_usb_cfm_tag *read_cfm;
     unsigned int drv_txcfm_idx = aml_hw->ipc_env->txcfm_idx;
     u8 i = 0;
-    unsigned int frame_tot_len = 0;
-    struct txdesc_host *txdesc_host = NULL;
     unsigned char  page_num = 0;
-    struct sched_param sch_param;
     uint32_t sp_ret = 0;
+#ifdef SDIO_MODE_ON
+    struct txdesc_host *txdesc_host = NULL;
     struct aml_sdio_txhdr *sdio_txhdr;
-
-    sch_param.sched_priority = 91;
-#ifndef CONFIG_PT_MODE
-    sched_setscheduler(current, SCHED_FIFO, &sch_param);
+    unsigned int frame_tot_len = 0;
 #endif
+
+    memset(&cfm, 0, sizeof(struct tx_cfm_tag));
+    aml_sched_rt_set(SCHED_FIFO, AML_TASK_PRI);
     while (!aml_hw->aml_txcfm_task_quit) {
         /* wait for work */
         if (down_interruptible(&aml_hw->aml_txcfm_sem) != 0) {
@@ -2210,6 +2304,7 @@ int aml_tx_cfm_task(void *data)
             break;
         }
 
+        AML_PROF_HI(tx_cfm_task);
         spin_lock_bh(&aml_hw->tx_lock);
         read_cfm = aml_hw->read_cfm;
 
@@ -2252,8 +2347,10 @@ int aml_tx_cfm_task(void *data)
 #endif
 
 #ifdef CONFIG_SDIO_TX_ENH
+#ifdef SDIO_MODE_ON
             if (aml_bus_type == SDIO_MODE)
                 aml_hw->txcfm_param.hostid_pushed--;
+#endif
 #ifdef SDIO_TX_ENH_DBG
             cfmlog.cfm_num++;
             cfmlog.hostid_pushed = aml_hw->txcfm_param.hostid_pushed;
@@ -2262,6 +2359,8 @@ int aml_tx_cfm_task(void *data)
 
             sw_txhdr = ((struct aml_txhdr *)skb->data)->sw_hdr;
             txq = sw_txhdr->txq;
+
+#ifdef SDIO_MODE_ON
             if (aml_bus_type == SDIO_MODE) {
                 frame_tot_len = 0;
                 txdesc_host = &sw_txhdr->desc;
@@ -2277,7 +2376,9 @@ int aml_tx_cfm_task(void *data)
                     }
                 }
                 page_num = howmanypage(frame_tot_len + SDIO_DATA_OFFSET + SDIO_FRAME_TAIL_LEN, SDIO_PAGE_LEN);
-            } else {
+            } else
+#endif
+            {
                 #ifdef CONFIG_AML_USB_LARGE_PAGE
                 page_num = 1;
                 #else
@@ -2286,23 +2387,27 @@ int aml_tx_cfm_task(void *data)
             }
             spin_lock_bh(&aml_hw->tx_buf_lock);
             aml_hw->g_tx_param.tx_page_free_num += page_num;
+
+#ifdef SDIO_MODE_ON
             if (aml_bus_type == SDIO_MODE) {
-                if (aml_hw->rx_buf_state & FW_BUFFER_EXPAND) {
+                if (aml_shared_mem_layout_get(&aml_hw->rx) == AML_RX_BUF_EXPAND) {
                     if (aml_hw->g_tx_param.tx_page_free_num > SDIO_TX_PAGE_NUM_SMALL) {
-                        printk("%s, %d, page_free=%d, tot_page=%d, page_num=%d\n", __func__, __LINE__, aml_hw->g_tx_param.tx_page_free_num, aml_hw->g_tx_param.tx_page_tot_num, page_num);
+                        AML_INFO("page_free=%d, tot_page=%d, page_num=%d\n", aml_hw->g_tx_param.tx_page_free_num, aml_hw->g_tx_param.tx_page_tot_num, page_num);
                     }
                 }
             }
+#endif
+
 #ifdef CONFIG_SDIO_TX_ENH
 #ifdef SDIO_TX_ENH_DBG
             cfmlog.cfm_page += page_num;
 #endif
 #endif
-            spin_unlock_bh(&aml_hw->tx_buf_lock);
-            AML_RLMT_WARN("tx_page_free_num=%d, credit=%d, pagenum=%d, skb=%p, cfm.credits=%d, drv_txcfm_idx=%d\n", aml_hw->g_tx_param.tx_page_free_num, txq->credits, page_num, skb, cfm.credits, drv_txcfm_idx);
+            AML_RLMT_DBG("tx_page_free_num=%d, credit=%d, pagenum=%d, skb=%p, cfm.credits=%d, drv_txcfm_idx=%d\n", aml_hw->g_tx_param.tx_page_free_num, txq->credits, page_num, skb, cfm.credits, drv_txcfm_idx);
             if (aml_hw->g_tx_param.tx_page_free_num >= aml_hw->g_tx_param.txcfm_trigger_tx_thr) {
                 up(&aml_hw->aml_tx_sem);
             }
+            spin_unlock_bh(&aml_hw->tx_buf_lock);
 
             /* don't use txq->hwq as it may have changed between push and confirm */
             hwq = &aml_hw->hwq[sw_txhdr->hw_queue];
@@ -2318,20 +2423,33 @@ int aml_tx_cfm_task(void *data)
                     (sw_txhdr->aml_sta) ? sw_txhdr->aml_sta->sta_idx : 0xFF, cfm.status.acknowledged);
                 if (aml_bus_type == USB_MODE)
                     mgmt = (struct ieee80211_mgmt *)(skb->data + AML_USB_TX_HEADROOM);
+#ifdef SDIO_MODE_ON
                 else if (aml_bus_type == SDIO_MODE)
                     mgmt = (struct ieee80211_mgmt *)(skb->data + AML_SDIO_TX_HEADROOM - AMSDU_LLC_LEN);
+#endif
+                if (mgmt == NULL)
+                    continue;
                 if ((ieee80211_is_deauth(mgmt->frame_control)) && (sw_txhdr->aml_vif->is_disconnect == 1)) {
                     sw_txhdr->aml_vif->is_disconnect = 0;
                 }
 
-                if (ieee80211_is_action(mgmt->frame_control)) {
-                    sp_ret = aml_filter_sp_mgmt_frame(sw_txhdr->aml_vif, (u8*)mgmt, cfm.status.acknowledged ? SP_STATUS_TX_SUC:SP_STATUS_TX_FAIL, 0, &(sw_txhdr->frame_len), (u64)skb);
-                    if (sp_ret & AML_CSA_ACTION_FRAME) {
-                        AML_INFO("csa action send cfm, status:%d, sta_idx:%d",
-                            cfm.status.acknowledged, (sw_txhdr->aml_sta) ? sw_txhdr->aml_sta->sta_idx : 0xFF);
+                aml_pkt_mgmt_txstatus(sw_txhdr->aml_vif, mgmt, cfm.status.acknowledged);
 
-                        if (!cfm.status.acknowledged && sw_txhdr->aml_vif->ap.csa) {
-                            AML_INFO("retry csa action");
+                if (ieee80211_is_action(mgmt->frame_control)) {
+                    u32 len_diff = sw_txhdr->frame_len;
+
+                    sp_ret = aml_filter_sp_mgmt_frame(sw_txhdr->aml_vif, (u8*)mgmt, cfm.status.acknowledged ? SP_STATUS_TX_SUC:SP_STATUS_TX_FAIL, 0, &len_diff, (uintptr_t)skb);
+                    sw_txhdr->frame_len = len_diff;
+                    if (sp_ret & AML_CSA_ACTION_FRAME) {
+                        struct aml_csa *csa = sw_txhdr->aml_vif->ap.csa;
+                        struct aml_sta *sta = sw_txhdr->aml_sta;
+
+                        AML_INFO("csa action send cfm, status:%d, sta_idx:%d",
+                            cfm.status.acknowledged, sta ? sta->sta_idx : 0xFF);
+
+                        if (!cfm.status.acknowledged && csa) {
+                            AML_INFO("retry csa action, count:%d\n", csa->count);
+                            mgmt->u.action.u.ext_chan_switch.data.count = csa->count;
                             aml_tx_retry(aml_hw, skb, sw_txhdr, cfm.status);
                             continue;
                         }
@@ -2339,7 +2457,8 @@ int aml_tx_cfm_task(void *data)
                 }
 
                 if (!cfm.status.acknowledged
-                    && ((sp_ret & AML_GAS_ACTION_FRAME) || (sp_ret & AML_MUST_TX_SUC))
+                    && ((sp_ret & AML_GAS_ACTION_FRAME) || (sp_ret & AML_MUST_TX_SUC)
+                    || (sp_ret & AML_DPP_CONNECT_STATUS_RESULT_FRAME))
                     && (txq->idx != TXQ_INACTIVE)) {
                     spin_lock_bh(&aml_hw->roc_lock);
                     if (aml_hw->roc && (jiffies_to_msecs(jiffies - aml_hw->roc->start_time) <= aml_hw->roc->duration)) {
@@ -2351,10 +2470,10 @@ int aml_tx_cfm_task(void *data)
                     spin_unlock_bh(&aml_hw->roc_lock);
                 }
 
-                if (cfm.status.acknowledged && (sp_ret & AML_GAS_INIT_REQ_FRAME)) {
+                if (cfm.status.acknowledged && (sp_ret & AML_GAS_INIT_REQ_FRAME) && (sw_txhdr->aml_vif->vif_index != AML_STA_VIF_IDX)) {
                     sw_txhdr->aml_vif->tx_cfm_wait.skb = skb_copy(skb, GFP_ATOMIC);
                     if (sw_txhdr->aml_vif->tx_cfm_wait.skb) {
-                        sw_txhdr->aml_vif->tx_cfm_wait.cookie = (u64)skb;
+                        sw_txhdr->aml_vif->tx_cfm_wait.cookie = (uintptr_t)skb;
                         sw_txhdr->aml_vif->tx_cfm_wait.len = sw_txhdr->frame_len;
                         sw_txhdr->aml_vif->tx_cfm_wait.wdev = &sw_txhdr->aml_vif->wdev;
                         cfm_tx_status = false;
@@ -2392,7 +2511,7 @@ int aml_tx_cfm_task(void *data)
 
                 /* continue service period */
                 if (unlikely(txq->push_limit && !aml_txq_is_full(txq))) {
-                    aml_txq_add_to_hw_list(txq);
+                    aml_txq_start(txq, AML_TXQ_STOP_FULL);
                 }
             }
             /* coverity[result_independent_of_operands] - Enhance code robustness */
@@ -2430,13 +2549,16 @@ int aml_tx_cfm_task(void *data)
             }
             aml_tx_statistic(sw_txhdr->aml_vif, txq, cfm.status, sw_txhdr->frame_len);
 
+#ifdef SDIO_MODE_ON
             if (aml_bus_type == SDIO_MODE) {
                 if (sw_txhdr->desc.api.host.flags & TXU_CNTRL_MGMT) {
                     skb_pull(skb, AML_SDIO_TX_HEADROOM - AMSDU_LLC_LEN);
                 } else {
                     skb_pull(skb, AML_SDIO_TX_HEADROOM);
                 }
-            } else {
+            } else
+#endif
+            {
                 skb_pull(skb, AML_USB_TX_HEADROOM);
             }
             kmem_cache_free(aml_hw->sw_txhdr_cache, sw_txhdr);
@@ -2458,16 +2580,12 @@ int aml_tx_cfm_task(void *data)
             consume_skb(skb);
         }
         spin_unlock_bh(&aml_hw->tx_lock);
-    }
-    if (aml_hw->aml_txcfm_completion_init) {
-        aml_hw->aml_txcfm_completion_init = 0;
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 16, 20)
-        complete_and_exit(&aml_hw->aml_txcfm_completion, 0);
-#else
-        complete(&aml_hw->aml_txcfm_completion);
-#endif
+        AML_PROF_LO(tx_cfm_task);
     }
 
+    while (!kthread_should_stop()) {
+        msleep(10);
+    }
     return 0;
 }
 
@@ -2496,6 +2614,8 @@ int aml_txdatacfm(void *pthis, void *arg)
     if (!skb)
         return -1;
 
+    BUG_ON(aml_bus_type != PCIE_MODE);
+
     sw_txhdr = ((struct aml_txhdr *)skb->data)->sw_hdr;
     txq = sw_txhdr->txq;
     /* don't use txq->hwq as it may have changed between push and confirm */
@@ -2515,14 +2635,24 @@ int aml_txdatacfm(void *pthis, void *arg)
         if ((ieee80211_is_deauth(mgmt->frame_control)) && (sw_txhdr->aml_vif->is_disconnect == 1)) {
             sw_txhdr->aml_vif->is_disconnect = 0;
         }
-        if (ieee80211_is_action(mgmt->frame_control)) {
-            sp_ret = aml_filter_sp_mgmt_frame(sw_txhdr->aml_vif, (u8*)mgmt, cfm->status.acknowledged ? SP_STATUS_TX_SUC:SP_STATUS_TX_FAIL, 0, &(sw_txhdr->frame_len), (u64)skb);
-            if (sp_ret & AML_CSA_ACTION_FRAME) {
-                AML_INFO("csa action send cfm, status:%d, sta_idx:%d",
-                    cfm->status.acknowledged, (sw_txhdr->aml_sta) ? sw_txhdr->aml_sta->sta_idx : 0xFF);
 
-                if (!cfm->status.acknowledged && sw_txhdr->aml_vif->ap.csa) {
-                    AML_INFO("retry csa action");
+        aml_pkt_mgmt_txstatus(sw_txhdr->aml_vif, mgmt, cfm->status.acknowledged);
+
+        if (ieee80211_is_action(mgmt->frame_control)) {
+            u32 len_diff = sw_txhdr->frame_len;
+
+            sp_ret = aml_filter_sp_mgmt_frame(sw_txhdr->aml_vif, (u8*)mgmt, cfm->status.acknowledged ? SP_STATUS_TX_SUC:SP_STATUS_TX_FAIL, 0, &len_diff, (uintptr_t)skb);
+            sw_txhdr->frame_len = len_diff;
+            if (sp_ret & AML_CSA_ACTION_FRAME) {
+                struct aml_csa *csa = sw_txhdr->aml_vif->ap.csa;
+                struct aml_sta *sta = sw_txhdr->aml_sta;
+
+                AML_INFO("csa action send cfm, status:%d, sta_idx:%d",
+                    cfm->status.acknowledged, sta ? sta->sta_idx : 0xFF);
+
+                if (!cfm->status.acknowledged && csa) {
+                    AML_INFO("retry csa action, count:%d\n", csa->count);
+                    mgmt->u.action.u.ext_chan_switch.data.count = csa->count;
                     aml_tx_retry(aml_hw, skb, sw_txhdr, cfm->status);
                     return 0;
                 }
@@ -2530,7 +2660,8 @@ int aml_txdatacfm(void *pthis, void *arg)
         }
 
         if (!cfm->status.acknowledged
-            && ((sp_ret & AML_GAS_ACTION_FRAME) || (sp_ret & AML_MUST_TX_SUC))
+            && ((sp_ret & AML_GAS_ACTION_FRAME) || (sp_ret & AML_MUST_TX_SUC)
+            || (sp_ret & AML_DPP_CONNECT_STATUS_RESULT_FRAME))
             && (txq->idx != TXQ_INACTIVE)) {
             spin_lock_bh(&aml_hw->roc_lock);
             if (aml_hw->roc && (jiffies_to_msecs(jiffies - aml_hw->roc->start_time) <= aml_hw->roc->duration)) {
@@ -2542,10 +2673,10 @@ int aml_txdatacfm(void *pthis, void *arg)
             spin_unlock_bh(&aml_hw->roc_lock);
         }
 
-        if (cfm->status.acknowledged && (sp_ret & AML_GAS_INIT_REQ_FRAME)) {
+        if (cfm->status.acknowledged && (sp_ret & AML_GAS_INIT_REQ_FRAME) && (sw_txhdr->aml_vif->vif_index != AML_STA_VIF_IDX)) {
             sw_txhdr->aml_vif->tx_cfm_wait.skb = skb_copy(skb, GFP_ATOMIC);
             if (sw_txhdr->aml_vif->tx_cfm_wait.skb) {
-                sw_txhdr->aml_vif->tx_cfm_wait.cookie = (u64)skb;
+                sw_txhdr->aml_vif->tx_cfm_wait.cookie = (uintptr_t)skb;
                 sw_txhdr->aml_vif->tx_cfm_wait.len = sw_txhdr->frame_len;
                 sw_txhdr->aml_vif->tx_cfm_wait.wdev = &sw_txhdr->aml_vif->wdev;
                 cfm_tx_status = false;
@@ -2583,7 +2714,7 @@ int aml_txdatacfm(void *pthis, void *arg)
 
         /* continue service period */
         if (unlikely(txq->push_limit && !aml_txq_is_full(txq))) {
-            aml_txq_add_to_hw_list(txq);
+            aml_txq_start(txq, AML_TXQ_STOP_FULL);
         }
     }
     /* coverity[result_independent_of_operands] - Enhance code robustness */
@@ -2700,7 +2831,7 @@ void aml_txq_credit_update(struct aml_hw *aml_hw, int sta_idx, u8 tid, s8 update
     aml_spin_unlock(&aml_hw->tx_lock);
 }
 
-void aml_tx_cfm_wait_rsp(struct aml_hw *aml_hw, bool ack, u8* func, u32 line)
+void aml_tx_cfm_wait_rsp(struct aml_hw *aml_hw, bool ack, const char *func, u32 line)
 {
     struct aml_vif *vif;
     struct aml_roc *roc = aml_hw->roc;

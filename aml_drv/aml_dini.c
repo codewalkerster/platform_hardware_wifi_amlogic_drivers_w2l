@@ -60,9 +60,9 @@ static void dini_dma_on(struct aml_dini *aml_dini)
 
     for (i = 0; i < ARRAY_SIZE(mv_cfg_fpga_dma_ctrl_regs); i++) {
         reg = aml_dini->pci_bar0_vaddr + mv_cfg_fpga_dma_ctrl_regs[i];
-        reread_time = aml_pci_readl(reg) & CFPGA_DMA_CTRL_REREAD_TIME_MASK;
-        aml_pci_writel(CFPGA_DMA_CTRL_CLEAR | reread_time, reg);
-        aml_pci_writel(CFPGA_DMA_CTRL_ENABLE | reread_time, reg);
+        reread_time = aml_pci_readl((u8 *)reg) & CFPGA_DMA_CTRL_REREAD_TIME_MASK;
+        aml_pci_writel(CFPGA_DMA_CTRL_CLEAR | reread_time, (u8 *)reg);
+        aml_pci_writel(CFPGA_DMA_CTRL_ENABLE | reread_time, (u8 *)reg);
     }
 }
 
@@ -75,10 +75,10 @@ static void dini_dma_off(struct aml_dini *aml_dini)
 
     for (i = 0; i < ARRAY_SIZE(mv_cfg_fpga_dma_ctrl_regs); i++) {
         reg = aml_dini->pci_bar0_vaddr + mv_cfg_fpga_dma_ctrl_regs[i];
-        reread_time = aml_pci_readl(reg) & CFPGA_DMA_CTRL_REREAD_TIME_MASK;
+        reread_time = aml_pci_readl((u8 *)reg) & CFPGA_DMA_CTRL_REREAD_TIME_MASK;
 
-        aml_pci_writel(CFPGA_DMA_CTRL_DISABLE | reread_time, reg);
-        aml_pci_writel(CFPGA_DMA_CTRL_CLEAR   | reread_time, reg);
+        aml_pci_writel(CFPGA_DMA_CTRL_DISABLE | reread_time, (u8 *)reg);
+        aml_pci_writel(CFPGA_DMA_CTRL_CLEAR   | reread_time, (u8 *)reg);
     }
 }
 
@@ -113,8 +113,8 @@ int aml_cfpga_irq_enable(struct aml_hw *aml_hw)
             return ret;
 
     reg = aml_dini->pci_bar0_vaddr + CFPGA_UINTR_MASK_REG;
-    cfpga_uintr_mask = aml_pci_readl(reg);
-    aml_pci_writel(cfpga_uintr_mask | CFPGA_PCIEX_IT, reg);
+    cfpga_uintr_mask = aml_pci_readl((u8 *)reg);
+    aml_pci_writel(cfpga_uintr_mask | CFPGA_PCIEX_IT, (u8 *)reg);
 
     return ret;
 }
@@ -131,8 +131,8 @@ int aml_cfpga_irq_disable(struct aml_hw *aml_hw)
     volatile void *reg;
 
     reg = aml_dini->pci_bar0_vaddr + CFPGA_UINTR_MASK_REG;
-    cfpga_uintr_mask = aml_pci_readl(reg);
-    aml_pci_writel(cfpga_uintr_mask & ~CFPGA_PCIEX_IT, reg);
+    cfpga_uintr_mask = aml_pci_readl((u8 *)reg);
+    aml_pci_writel(cfpga_uintr_mask & ~CFPGA_PCIEX_IT, (u8 *)reg);
 
     free_irq(aml_hw->plat->pci_dev->irq, aml_hw);
 
@@ -180,8 +180,10 @@ static u8* aml_dini_get_address(struct aml_plat *aml_plat, int addr_name,
 {
     struct aml_dini *aml_dini = (struct aml_dini *)aml_plat->priv;
 
-    if (WARN(addr_name >= AML_ADDR_MAX, "Invalid address %d", addr_name))
+    if (addr_name >= AML_ADDR_MAX) {
+        AML_ERR("Invalid address %d", addr_name);
         return NULL;
+    }
 
     if (addr_name == AML_ADDR_CPU)
         dini_set_bar4_win(CPU_RAM_WINDOW_LOW, CPU_RAM_WINDOW_HIGH, aml_dini);
@@ -244,24 +246,24 @@ int aml_dini_platform_init(struct pci_dev *pci_dev, struct aml_plat **aml_plat)
     pci_write_config_byte(pci_dev, PCI_CACHE_LINE_SIZE, L1_CACHE_BYTES >> 2);
 
     if ((ret = pci_enable_device(pci_dev))) {
-        dev_err(&(pci_dev->dev), "pci_enable_device failed\n");
+        AML_ERR("pci_enable_device failed\n");
         goto out_enable;
     }
 
     pci_set_master(pci_dev);
 
     if ((ret = pci_request_regions(pci_dev, KBUILD_MODNAME))) {
-        dev_err(&(pci_dev->dev), "pci_request_regions failed\n");
+        AML_ERR("pci_request_regions failed\n");
         goto out_request;
     }
 
     if (!(aml_dini->pci_bar0_vaddr = (u8 *)pci_ioremap_bar(pci_dev, 0))) {
-        dev_err(&(pci_dev->dev), "pci_ioremap_bar(%d) failed\n", 0);
+        AML_ERR("pci_ioremap_bar(%d) failed\n", 0);
         ret = -ENOMEM;
         goto out_bar0;
     }
     if (!(aml_dini->pci_bar4_vaddr = (u8 *)pci_ioremap_bar(pci_dev, 4))) {
-        dev_err(&(pci_dev->dev), "pci_ioremap_bar(%d) failed\n", 4);
+        AML_ERR("pci_ioremap_bar(%d) failed\n", 4);
         ret = -ENOMEM;
         goto out_bar4;
     }

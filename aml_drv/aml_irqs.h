@@ -16,13 +16,15 @@
 void aml_irq_usb_hdlr(struct urb *urb);
 int aml_irq_task(void *data);
 
-irqreturn_t aml_irq_sdio_hdlr(int irq, void *dev_id);
-void aml_irq_sdio_hdlr_for_pt(struct sdio_func *func);
+int aml_usb_irq_urb_submit(struct aml_hw *aml_hw);
+
+int aml_sdio_irq_claim(struct aml_hw *aml_hw);
+void aml_sdio_irq_release(struct aml_hw *aml_hw);
+
+void aml_enable_sdio_irq(struct aml_hw *aml_hw);
+u32 aml_sdio_ack_irq(struct aml_hw *aml_hw);
+
 irqreturn_t aml_irq_pcie_hdlr(int irq, void *dev_id);
 void aml_pcie_task(unsigned long data);
-void aml_enable_sdio_irq(struct aml_hw *aml_hw);
-u32 aml_disable_sdio_irq(struct aml_hw *aml_hw);
-void aml_sdio_dat1_release(struct aml_hw *aml_hw);
-void aml_sdio_dat1_claim(struct aml_hw *aml_hw);
 
 #endif /* _AML_IRQS_H_ */

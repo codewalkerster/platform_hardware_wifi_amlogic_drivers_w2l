@@ -1,3 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
 #ifndef _AML_SCC_H_
 #define _AML_SCC_H_
 
@@ -10,6 +17,14 @@ enum
     BEACON_UPDATE_WAIT_PROBE,
     BEACON_UPDATE_WAIT_DOWNLOAD
 };
+
+#ifdef CONFIG_ROKU
+enum
+{
+    CSA_FINISHED = 0,
+    CSA_STARTED
+};
+#endif
 
 #define AML_SCC_BEACON_SET_STATUS(x)        (beacon_need_update = x)
 #define AML_SCC_BEACON_WAIT_PROBE()         (beacon_need_update == BEACON_UPDATE_WAIT_PROBE)
@@ -31,15 +46,16 @@ extern bool g_scc_p2p_peer_5g_support;
 
 int aml_scc_change_beacon(struct aml_hw *aml_hw, struct aml_vif *vif);
 u8 aml_scc_get_conflict_vif_idx(struct aml_vif *incoming_vif);
-void aml_scc_check_chan_conflict(struct aml_hw *aml_hw);
+int aml_scc_check_chan_conflict(struct aml_hw *aml_hw);
 void aml_scc_save_init_band(u32 init_band);
 void aml_scc_save_probe_rsp(struct aml_vif *vif, u8 *buf, u32 buf_len);
 void aml_scc_init(void);
 void aml_scc_deinit(void);
-void aml_scc_sync_bcn(struct aml_hw *aml_hw, struct aml_wq *aml_wq);
 void aml_check_scc(void);
-u8 aml_get_operation_class(struct cfg80211_chan_def chan_def);
 void aml_scc_p2p_action_restore(u8 *buf, u32* len_diff);
-int aml_csa_send_action(struct aml_hw *aml_hw, struct aml_vif *aml_vif, struct aml_sta *sta, struct cfg80211_chan_def chan_def);
+int aml_csa_send_action(struct aml_hw *aml_hw, struct aml_sta *sta, struct aml_csa *csa);
+#ifdef CONFIG_ROKU
+int aml_wq_switch_to_home_chan(struct aml_hw *aml_hw, void *ptr);
+#endif
 
 #endif /* _AML_SCC_H_ */

@@ -27,7 +27,7 @@
 #ifdef CONFIG_PT_MODE
     #define AML_80211_CMD_TIMEOUT_MS    1000
 #else
-    #define AML_80211_CMD_TIMEOUT_MS    9000
+    #define AML_80211_CMD_TIMEOUT_MS    3000
 #endif
 #endif
 
@@ -45,7 +45,7 @@
 
 #define AML_CMD_MAX_QUEUED         8
 #define AML_FW_PC_POINTER   0x00a070b4
-#define CMD_CRASH_FW_PC_NUM 5
+#define CMD_CRASH_FW_PC_NUM 2
 
 #ifdef CONFIG_AML_FHOST
 #include "ipc_fhost.h"
@@ -107,7 +107,19 @@ struct aml_cmd_mgr {
     void (*drain)(struct aml_cmd_mgr *);
 };
 
+#define CMD_PRINT(cmd) do { \
+    if (cmd->id != ME_TRAFFIC_IND_REQ) { \
+        if (!is_mdnsoffload_msg(cmd->mm_sub_id)) { \
+            AML_INFO("cmd tkn[%d]  flags:%04x  result:%3d  cmd:%4d-%-24s - reqcfm(%4d-%-s)\n", \
+               cmd->tkn, cmd->flags, cmd->result, cmd->id, cmd->id == MM_OTHER_REQ ? AML_MM_OTHER_CMD2STR(cmd) : AML_ID2STR(cmd->id), \
+               cmd->reqid, (((cmd->flags & AML_CMD_FLAG_REQ_CFM) && \
+               (cmd->reqid != (lmac_msg_id_t)-1)) ? AML_ID2STR(cmd->reqid) : "none")); \
+        } \
+    } \
+} while (0);
+
 void aml_cmd_mgr_init(struct aml_cmd_mgr *cmd_mgr);
 void aml_cmd_mgr_deinit(struct aml_cmd_mgr *cmd_mgr);
+int aml_cmd_print_subid_filter(u16_l mm_sub_id);
 
 #endif /* _AML_CMDS_H_ */

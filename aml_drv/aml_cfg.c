@@ -44,7 +44,7 @@ static void aml_cfg_close(struct file *fp)
     FILE_CLOSE(fp, NULL);
 }
 
-static int aml_cfg_read(struct file *fp, char *buf, int len)
+static int __aml_cfg_read(struct file *fp, unsigned char *buf, int len)
 {
     int rlen = 0, sum = 0;
 
@@ -52,7 +52,7 @@ static int aml_cfg_read(struct file *fp, char *buf, int len)
         rlen = FILE_READ(fp, buf + sum, len - sum, &fp->f_pos);
         if (rlen > 0) {
             sum += rlen;
-        } else if (0 != rlen) {
+        } else if (rlen < 0) {
             return rlen;
         } else {
             break;
@@ -61,7 +61,22 @@ static int aml_cfg_read(struct file *fp, char *buf, int len)
     return sum;
 }
 
-static int aml_cfg_write(struct file *fp, char *buf, int len)
+static int aml_cfg_read(struct file *fp, unsigned char **pbuf, int len)
+{
+    if (len > 0) {
+        char *buf = kzalloc(len, GFP_KERNEL);
+
+        if (buf) {
+            *pbuf = buf;
+            return __aml_cfg_read(fp, buf, len);
+        }
+        AML_ERR("no buffer (%d)!\n", len);
+    }
+    *pbuf = NULL;
+    return -1;
+}
+
+static int aml_cfg_write(struct file *fp, unsigned char *buf, int len)
 {
     int wlen = 0, sum = 0;
 
@@ -77,15 +92,15 @@ static int aml_cfg_write(struct file *fp, char *buf, int len)
     return sum;
 }
 
-static int aml_cfg_retrieve(const char *path, u8 *buf, u32 len)
+static int aml_cfg_retrieve(const char *path, u8 **pbuf, u32 len)
 {
     struct file *fp;
     int ret = -1;
 
-    if (path && buf) {
+    if (path) {
         fp = aml_cfg_open(path, O_RDONLY, 0);
         if (fp) {
-            ret = aml_cfg_read(fp, buf, len);
+            ret = aml_cfg_read(fp, pbuf, len);
             aml_cfg_close(fp);
         }
     } else {
@@ -135,29 +150,34 @@ static const u8 *aml_cfg_find_tag(const u8 *file_data, unsigned int file_size,
 
 static void aml_cfg_store_tag(struct file *fp, const char *tag_name, const char *tag_value)
 {
-    unsigned char lbuf[AML_CFG_LBUF_MAXLEN];
-    unsigned char fbuf[AML_CFG_FBUF_MAXLEN];
+    unsigned char lbuf[AML_CFG_LBUF_MAXLEN] = {0};
+    unsigned char *fbuf = NULL;
 
     if (!fp || !tag_name || !tag_value)
         return;
 
     if (strlen(tag_name) + strlen(tag_value) > AML_CFG_LBUF_MAXLEN) {
-        AML_INFO("store tag name exceed max line len(%d)", AML_CFG_LBUF_MAXLEN);
+        AML_ERR("store tag name exceed max line len(%d)", AML_CFG_LBUF_MAXLEN);
         return;
     }
 
-    sprintf(lbuf, "%s=%s\n", tag_name, tag_value);
-    AML_INFO("store %s=%s(len=%d) tag to file\n", tag_name, tag_value, strlen(lbuf));
+    snprintf(lbuf, sizeof(lbuf), "%s=%s\n", tag_name, tag_value);
+    AML_INFO("store %s=%s(len=%d) tag to file\n", tag_name, tag_value, (int)strlen(lbuf));
 
-    aml_cfg_read(fp, fbuf, AML_CFG_FBUF_MAXLEN);
+    if (aml_cfg_read(fp, &fbuf, AML_CFG_FBUF_MAXLEN) < 0) {
+        kfree(fbuf);
+        return;
+    }
+
     if (strlen(fbuf) + strlen(lbuf) > AML_CFG_FBUF_MAXLEN) {
-        AML_INFO("store tag name exceed max file len(%d)", AML_CFG_FBUF_MAXLEN);
+        AML_ERR("store tag name exceed max file len(%d)", AML_CFG_FBUF_MAXLEN);
         goto out;
     }
-    sprintf(fbuf, "%s", lbuf);
+    snprintf(fbuf, AML_CFG_FBUF_MAXLEN, "%s", lbuf);
     aml_cfg_write(fp, fbuf, strlen(fbuf));
 
 out:
+    kfree(fbuf);
     return;
 }
 
@@ -167,7 +187,7 @@ static void aml_cfg_get_chipid(struct aml_hw *aml_hw, struct aml_cfg *cfg)
     cfg->chipid_h = aml_efuse_read(aml_hw, AML_EFUSE_CHIPID_HIGH);
 
     AML_INFO("get_chipid from efuse:%04x%08x",
-        cfg->chipid_h & 0xffff, cfg->chipid_l);
+            cfg->chipid_h & 0xffff, cfg->chipid_l);
 }
 
 static int aml_cfg_get_macaddr(struct aml_hw *aml_hw, u8 *mac_addr)
@@ -214,7 +234,7 @@ static void aml_cfg_store_chipid(struct file *fp, struct aml_cfg *cfg)
 
 static void aml_cfg_store_macaddr(struct file *fp, struct aml_cfg *cfg)
 {
-    char mac_str[strlen("00:00:00:00:00:00") + 1];
+    char mac_str[sizeof("00:00:00:00:00:00")];
 
     sprintf(mac_str, MACFMT, MACARG(cfg->vif0_mac));
     aml_cfg_store_tag(fp, "VIF0_MACADDR", mac_str);
@@ -250,8 +270,6 @@ static int aml_cfg_to_file(struct aml_hw *aml_hw, struct aml_cfg *cfg, struct fi
 #ifdef CONFIG_AML_NAN_SUPPORT
     u8 vif3_mac[ETH_ALEN] = { 0x1e, 0xa4, 0x10, 0x11, 0x22, 0x32 };
 #endif
-    u8 bcst_mac[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
-    int ret = -1;
 
     if (!aml_hw || !cfg)
         return -1;
@@ -262,59 +280,62 @@ static int aml_cfg_to_file(struct aml_hw *aml_hw, struct aml_cfg *cfg, struct fi
     /* mac address rule:
      * - wifi_conf.txt only for efuse/local
      * - priority:
-     *     efuse > local random
+     *      efuse > local random
      * - use aml oui:
-     *     efuse (no), local (yes)
-     * */
+     *      efuse (no), local (yes)
+     */
     do {
+        int ret;
+
 #ifdef CONFIG_AML_PLATFORM_ANDROID
         /* get mac address from android (emmc) */
-        memcpy(vif0_mac, wifi_get_mac(), ETH_ALEN);
-        if (!fp && memcmp(vif0_mac, bcst_mac, ETH_ALEN) != 0) {
+        ether_addr_copy(vif0_mac, wifi_get_mac());
+        if (!fp && is_valid_ether_addr(vif0_mac)) {
             aml_cfg_check_macaddr(vif0_mac, 0);
             AML_INFO("get mac address from emmc is:%pM", vif0_mac);
             break;
         }
 #endif
         /* get mac address from efuse */
+        /* coverity[value_overwrite] --Overwriting previous write to "ret"*/
         ret = aml_cfg_get_macaddr(aml_hw, vif0_mac);
-        if (ret == 0) {
+        if (ret == 0 && is_valid_ether_addr(vif0_mac)) {
             aml_cfg_check_macaddr(vif0_mac, 0);
             AML_INFO("get mac address from efuse is:%pM", vif0_mac);
             break;
         }
 #ifdef CONFIG_AML_PLATFORM_RANDOM_MAC
         /* get mac address from android (random) */
-        memcpy(vif0_mac, wifi_get_mac_random(), ETH_ALEN);
-        if (!fp && memcmp(vif0_mac, bcst_mac, ETH_ALEN) != 0) {
+        ether_addr_copy(vif0_mac, wifi_get_mac_random());
+        if (!fp && is_valid_ether_addr(vif0_mac)) {
             aml_cfg_check_macaddr(vif0_mac, 0);
             AML_INFO("get mac address from platform random is:%pM", vif0_mac);
             break;
         }
 #endif
         else {
-            get_random_bytes(vif0_mac, ETH_ALEN);
+            eth_random_addr(vif0_mac);
             aml_cfg_check_macaddr(vif0_mac, 1);
             AML_INFO("get mac address from local is:%pM", vif0_mac);
         }
     } while (0);
 
     /* locally administered for vif1_mac */
-    memcpy(vif1_mac, vif0_mac, ETH_ALEN);
+    ether_addr_copy(vif1_mac, vif0_mac);
     vif1_mac[0] |= BIT(1);
-    memcpy(vif2_mac, vif1_mac, ETH_ALEN);
+    ether_addr_copy(vif2_mac, vif1_mac);
     vif2_mac[5] ^= BIT(0);
 #ifdef CONFIG_AML_NAN_SUPPORT
-    memcpy(vif3_mac, vif2_mac, ETH_ALEN);
+    ether_addr_copy(vif3_mac, vif2_mac);
     vif3_mac[5] ^= BIT(1);
 #endif
 
     /* update mac address to cfg->vifx_mac */
-    memcpy(cfg->vif0_mac, vif0_mac, ETH_ALEN);
-    memcpy(cfg->vif1_mac, vif1_mac, ETH_ALEN);
-    memcpy(cfg->vif2_mac, vif2_mac, ETH_ALEN);
+    ether_addr_copy(cfg->vif0_mac, vif0_mac);
+    ether_addr_copy(cfg->vif1_mac, vif1_mac);
+    ether_addr_copy(cfg->vif2_mac, vif2_mac);
 #ifdef CONFIG_AML_NAN_SUPPORT
-    memcpy(cfg->vif3_mac, vif3_mac, ETH_ALEN);
+    ether_addr_copy(cfg->vif3_mac, vif3_mac);
 #endif
     AML_INFO("vif0 mac address:%pM, vif1 mac address: %pM, vif2 mac address: %pM\n",
         cfg->vif0_mac, cfg->vif1_mac, cfg->vif2_mac);
@@ -327,20 +348,25 @@ static int aml_cfg_to_file(struct aml_hw *aml_hw, struct aml_cfg *cfg, struct fi
     return 0;
 }
 
-static int aml_cfg_from_file(struct aml_cfg *cfg, struct file *fp)
+static int aml_cfg_from_file(struct aml_hw *aml_hw, struct aml_cfg *cfg, struct file *fp)
 {
-    u8 fbuf[AML_CFG_FBUF_MAXLEN] = {0};
+    u8 *fbuf = NULL;
     const u8 *tag_ptr = NULL;
-    u8 bcst_mac[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+#ifdef CONFIG_AML_PLATFORM_ANDROID
+    u8 emmc_mac[ETH_ALEN] = {0};
+#endif
     u8 chipid_h[5];
-    int ret = -1;
+    int ret;
 
-    if (!cfg || !fp)
-        return -1;
+    if (!cfg || !fp) {
+        AML_ERR("cfg:%px or fp:%px err\n", cfg, fp);
+        return 0;
+    }
 
-    ret = aml_cfg_read(fp, fbuf, AML_CFG_FBUF_MAXLEN);
-    if (ret >= AML_CFG_FBUF_MAXLEN) {
-        AML_INFO("read file data error");
+    ret = aml_cfg_read(fp, &fbuf, AML_CFG_FBUF_MAXLEN);
+    if (ret <= 0) {
+        AML_ERR("read file data error");
+        kfree(fbuf);
         return -1;
     }
 
@@ -359,20 +385,21 @@ static int aml_cfg_from_file(struct aml_cfg *cfg, struct file *fp)
      * if wifi_conf.txt exist
      * - get mac from android(emmc) every time
      * - get mac from wifi_conf.txt (avoid efuse read fail)
-     * */
+     */
 #ifdef CONFIG_AML_PLATFORM_ANDROID
-    /* get mac address from amlogic android(emmc) */
-    memcpy(cfg->vif0_mac, wifi_get_mac(), ETH_ALEN);
-    if (memcmp(cfg->vif0_mac, bcst_mac, ETH_ALEN) != 0)
+    ether_addr_copy(emmc_mac, wifi_get_mac());
+    if (is_valid_ether_addr(emmc_mac))
     {
+        /* get mac address from amlogic android(emmc) */
+        ether_addr_copy(cfg->vif0_mac, emmc_mac);
         aml_cfg_check_macaddr(cfg->vif0_mac, 0);
         /* locally administered for vif1_mac and vif2_mac */
-        memcpy(cfg->vif1_mac, cfg->vif0_mac, ETH_ALEN);
+        ether_addr_copy(cfg->vif1_mac, cfg->vif0_mac);
         cfg->vif1_mac[0] |= BIT(1);
-        memcpy(cfg->vif2_mac, cfg->vif1_mac, ETH_ALEN);
+        ether_addr_copy(cfg->vif2_mac, cfg->vif1_mac);
         cfg->vif2_mac[5] ^= BIT(0);
 #ifdef CONFIG_AML_NAN_SUPPORT
-        memcpy(cfg->vif3_mac, cfg->vif2_mac, ETH_ALEN);
+        ether_addr_copy(cfg->vif3_mac, cfg->vif2_mac);
         cfg->vif3_mac[5] ^= BIT(1);
 #endif
         AML_INFO("vif0 mac address:%pM, vif1 mac address: %pM, vif2 mac address: %pM\n",
@@ -385,7 +412,7 @@ static int aml_cfg_from_file(struct aml_cfg *cfg, struct file *fp)
         tag_ptr = aml_cfg_find_tag(fbuf, strlen(fbuf),
                 "VIF0_MACADDR=", strlen("00:00:00:00:00:00"));
         if (tag_ptr) {
-            sscanf((const char *)tag_ptr,
+            ret = sscanf((const char *)tag_ptr,
                     "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
                     cfg->vif0_mac + 0, cfg->vif0_mac + 1,
                     cfg->vif0_mac + 2, cfg->vif0_mac + 3,
@@ -397,7 +424,7 @@ static int aml_cfg_from_file(struct aml_cfg *cfg, struct file *fp)
         tag_ptr = aml_cfg_find_tag(fbuf, strlen(fbuf),
                 "VIF1_MACADDR=", strlen("00:00:00:00:00:00"));
         if (tag_ptr) {
-            sscanf((const char *)tag_ptr,
+            ret = sscanf((const char *)tag_ptr,
                     "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
                     cfg->vif1_mac + 0, cfg->vif1_mac + 1,
                     cfg->vif1_mac + 2, cfg->vif1_mac + 3,
@@ -409,7 +436,7 @@ static int aml_cfg_from_file(struct aml_cfg *cfg, struct file *fp)
         tag_ptr = aml_cfg_find_tag(fbuf, strlen(fbuf),
                 "VIF2_MACADDR=", strlen("00:00:00:00:00:00"));
         if (tag_ptr) {
-            sscanf((const char *)tag_ptr,
+            ret = sscanf((const char *)tag_ptr,
                     "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
                     cfg->vif2_mac + 0, cfg->vif2_mac + 1,
                     cfg->vif2_mac + 2, cfg->vif2_mac + 3,
@@ -430,8 +457,39 @@ static int aml_cfg_from_file(struct aml_cfg *cfg, struct file *fp)
             AML_INFO("get vif3 mac:"MACFMT, MACARG(cfg->vif3_mac));
         }
 #endif
+
+        /* and protect for wifi_conf.txt invalid or malformed mac address */
+        if (!is_valid_ether_addr(cfg->vif0_mac) ||
+            !is_valid_ether_addr(cfg->vif1_mac) ||
+#ifdef CONFIG_AML_NAN_SUPPORT
+            !is_valid_ether_addr(cfg->vif3_mac) ||
+#endif
+            !is_valid_ether_addr(cfg->vif2_mac)) {
+            /* get mac address from efuse */
+            ret = aml_cfg_get_macaddr(aml_hw, cfg->vif0_mac);
+            if (ret == 0 && is_valid_ether_addr(cfg->vif0_mac)) {
+                aml_cfg_check_macaddr(cfg->vif0_mac, 0);
+                AML_INFO("get mac address from efuse is:%pM\n", cfg->vif0_mac);
+            } else {
+                eth_random_addr(cfg->vif0_mac);
+                aml_cfg_check_macaddr(cfg->vif0_mac, 1);
+            }
+
+            /* locally administered for vif1_mac and vif2_mac */
+            ether_addr_copy(cfg->vif1_mac, cfg->vif0_mac);
+            cfg->vif1_mac[0] |= BIT(1);
+            ether_addr_copy(cfg->vif2_mac, cfg->vif1_mac);
+            cfg->vif2_mac[5] ^= BIT(0);
+#ifdef CONFIG_AML_NAN_SUPPORT
+            ether_addr_copy(cfg->vif3_mac, cfg->vif2_mac);
+            cfg->vif3_mac[5] ^= BIT(1);
+#endif
+            AML_INFO("renew vif0 mac:%pM, vif1 mac:%pM, vif2 mac:%pM\n",
+                    cfg->vif0_mac, cfg->vif1_mac, cfg->vif2_mac);
+        }
     }
 
+    kfree(fbuf);
     return 0;
 }
 
@@ -439,17 +497,17 @@ int aml_cfg_parse(struct aml_hw *aml_hw, struct aml_cfg *cfg)
 {
     const char *path = AML_CFG_DEFAULT_PATH;
     struct file *fp = NULL;
-    int status = -1;
+    int status;
 
     status = aml_cfg_create(path, &fp);
     switch (status) {
         case AML_CFG_EXIST:
-            aml_cfg_from_file(cfg, fp);
+            aml_cfg_from_file(aml_hw, cfg, fp);
             break;
         case AML_CFG_CREATE:
             aml_cfg_to_file(aml_hw, cfg, fp);
             fp->f_pos = 0;
-            aml_cfg_from_file(cfg, fp);
+            aml_cfg_from_file(aml_hw, cfg, fp);
             break;
         case AML_CFG_ERROR:
             /* when fp == NULL, just update */
@@ -467,18 +525,19 @@ int aml_cfg_parse(struct aml_hw *aml_hw, struct aml_cfg *cfg)
 
 int aml_get_mac_addr_from_conftxt(unsigned int *efuse_data_l, unsigned int *efuse_data_h)
 {
-    int ret = -1;
+    int ret;
     const u8 *tag_ptr;
-    u8 fbuf[AML_CFG_FBUF_MAXLEN] = {0};
+    u8 *fbuf = NULL;
     const char *path = AML_CFG_DEFAULT_PATH;
 
-    ret = aml_cfg_retrieve(path, fbuf, AML_CFG_FBUF_MAXLEN);
-    if (ret >= AML_CFG_FBUF_MAXLEN) {
-        AML_INFO("retrieve file data error\n");
+    ret = aml_cfg_retrieve(path, &fbuf, AML_CFG_FBUF_MAXLEN);
+    if (ret <= 0 || ret >= AML_CFG_FBUF_MAXLEN) {
+        AML_ERR("retrieve file data error\n");
+        kfree(fbuf);
         return -1;
     }
 
-    tag_ptr = aml_cfg_find_tag(fbuf, strlen(fbuf),
+    tag_ptr = aml_cfg_find_tag((u8 *)fbuf, strlen(fbuf),
             "VIF0_MACADDR=", strlen("00:00:00:00:00:00"));
 
     if (tag_ptr != NULL)
@@ -491,6 +550,7 @@ int aml_get_mac_addr_from_conftxt(unsigned int *efuse_data_l, unsigned int *efus
                         | (simple_strtoul(tag_ptr + 3, NULL, 16));
     }
 
+    kfree(fbuf);
     return 0;
 }
 
@@ -646,7 +706,7 @@ int aml_cfg_parse_phy(struct aml_hw *aml_hw, const char *filename,
     struct file *fp; \
     int i;\
     for (i = 0; i < 4; i++) { \
-        sprintf(path, "/sys/class/net/%s/queues/rx-%d/rps_cpus", \
+        snprintf(path, sizeof(path), "/sys/class/net/%s/queues/rx-%d/rps_cpus", \
                 (is_sta == 1) ? "wlan0": "ap0", i); \
         fp = aml_cfg_open(path, O_RDWR, 0666); \
         if (!fp) return; \
@@ -660,7 +720,7 @@ int aml_cfg_parse_phy(struct aml_hw *aml_hw, const char *filename,
     struct file *fp; \
     int i;\
     for (i = 0; i < 4; i++) { \
-        sprintf(path, "/sys/class/net/%s/queues/rx-%d/rps_flow_cnt", \
+        snprintf(path, sizeof(path), "/sys/class/net/%s/queues/rx-%d/rps_flow_cnt", \
                 (is_sta == 1) ? "wlan0": "ap0", i); \
         fp = aml_cfg_open(path, O_RDWR, 0666); \
         if (!fp) return; \
@@ -672,7 +732,7 @@ int aml_cfg_parse_phy(struct aml_hw *aml_hw, const char *filename,
 #define AML_CFG_RPS_SOCK()  do { \
     char path[128]; \
     struct file *fp; \
-    sprintf(path, "/proc/sys/net/core/rps_sock_flow_entries"); \
+    snprintf(path, sizeof(path), "/proc/sys/net/core/rps_sock_flow_entries"); \
     fp = aml_cfg_open(path, O_RDWR, 0666); \
     if (!fp) return; \
     aml_cfg_write(fp, "16384", strlen("16384")); \

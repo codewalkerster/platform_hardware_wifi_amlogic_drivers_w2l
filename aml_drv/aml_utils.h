@@ -99,8 +99,6 @@ struct aml_tx_cfmed {
 #define TX_BUF_CNT    127
 #define TX_LIST_CNT   64
 #define TXDESC_WRITE_ONCE_CNT  32
-#define USB_TXCMD_CARRY_RXRD_START_INDEX 401
-#define UPDATE_FLAG 0x11223344
 
 
 static const u32 aml_tx_pattern = 0xCAFEFADE;
@@ -140,13 +138,14 @@ int aml_ipc_init(struct aml_hw *aml_hw, u8 *shared_ram, u8 *shared_host_rxbuf, u
 void aml_ipc_deinit(struct aml_hw *aml_hw);
 void aml_ipc_start(struct aml_hw *aml_hw);
 void aml_ipc_stop(struct aml_hw *aml_hw);
-void aml_ipc_msg_push(struct aml_hw *aml_hw, void *msg_buf, uint16_t len);
+int aml_ipc_msg_push(struct aml_hw *aml_hw, void *msg_buf, uint16_t len);
 
 /**
  * IPC buffer management
  */
-int aml_ipc_buf_alloc(struct aml_hw *aml_hw, struct aml_ipc_buf *buf,
+int aml_ipc_buf_alloc(struct aml_hw *aml_hw, struct aml_ipc_buf *buf, void *pre,
                        size_t buf_size, enum dma_data_direction dir, const void *init);
+
 /**
  * aml_ipc_buf_e2a_alloc() - Allocate an Embedded To Application Input IPC buffer
  *
@@ -155,33 +154,21 @@ int aml_ipc_buf_alloc(struct aml_hw *aml_hw, struct aml_ipc_buf *buf,
  * @buf_size: Size of the Buffer to allocate
  * @return: 0 on success and != 0 otherwise
  */
+static inline int aml_ipc_buf_e2a_alloc_pre(struct aml_hw *aml_hw,
+                                            struct aml_ipc_buf *buf,
+                                            void *pre,
+                                            size_t buf_size)
+{
+    return aml_ipc_buf_alloc(aml_hw, buf, pre, buf_size, DMA_FROM_DEVICE, NULL);
+}
+
 static inline int aml_ipc_buf_e2a_alloc(struct aml_hw *aml_hw,
                                          struct aml_ipc_buf *buf,
                                          size_t buf_size)
 {
-    return aml_ipc_buf_alloc(aml_hw, buf, buf_size, DMA_FROM_DEVICE, NULL);
+    return aml_ipc_buf_e2a_alloc_pre(aml_hw, buf, NULL, buf_size);
 }
 
-#ifdef CONFIG_AML_PREALLOC_BUF_STATIC
-int aml_ipc_buf_prealloc(struct aml_hw *aml_hw, struct aml_ipc_buf *buf, size_t buf_size,
-                          int buf_type, enum dma_data_direction dir, const void *init);
-
-/**
- * aml_ipc_buf_e2a_prealloc() - Requesting prealloc an Embedded To Application Input IPC buffer
- *
- * @aml_hw: Main driver data
- * @buf: IPC buffer structure to store IPC buffer information
- * @buf_size: Size of the Buffer to allocate
- * @buf_type: Type of the Buffer to allocate
- * @return: 0 on success and != 0 otherwise
- */
-static inline int aml_ipc_buf_e2a_prealloc(struct aml_hw *aml_hw,
-                                         struct aml_ipc_buf *buf,
-                                         size_t buf_size, int buf_type)
-{
-    return aml_ipc_buf_prealloc(aml_hw, buf, buf_size, buf_type, DMA_FROM_DEVICE, NULL);
-}
-#endif
 /**
  * aml_ipc_buf_a2e_alloc() - Allocate an Application to Embedded Output IPC buffer
  *
@@ -192,12 +179,24 @@ static inline int aml_ipc_buf_e2a_prealloc(struct aml_hw *aml_hw,
  * @buf_size long
  * @return: 0 on success and != 0 otherwise
  */
-static inline int aml_ipc_buf_a2e_alloc(struct aml_hw *aml_hw,
-                                         struct aml_ipc_buf *buf,
-                                         size_t buf_size, const void *buf_data)
+static inline int aml_ipc_buf_a2e_alloc_pre(struct aml_hw *aml_hw,
+                                            struct aml_ipc_buf *buf,
+                                            void *pre,
+                                            size_t buf_size,
+                                            const void *buf_data)
 {
-    return aml_ipc_buf_alloc(aml_hw, buf, buf_size, DMA_TO_DEVICE, buf_data);
+    return aml_ipc_buf_alloc(aml_hw, buf, pre, buf_size, DMA_TO_DEVICE, buf_data);
 }
+
+static inline int aml_ipc_buf_a2e_alloc(struct aml_hw *aml_hw,
+                                        struct aml_ipc_buf *buf,
+                                        size_t buf_size,
+                                        const void *buf_data)
+{
+    return aml_ipc_buf_a2e_alloc_pre(aml_hw, buf, NULL, buf_size, buf_data);
+}
+
+
 void aml_ipc_buf_dealloc(struct aml_hw *aml_hw, struct aml_ipc_buf *buf);
 int aml_ipc_buf_a2e_init(struct aml_hw *aml_hw, struct aml_ipc_buf *buf,
                           void *data, size_t buf_size);
@@ -211,7 +210,7 @@ void aml_ipc_buf_release(struct aml_hw *aml_hw, struct aml_ipc_buf *buf,
  * @aml_hw: Main driver structure
  * @buf: IPC buffer to release
  *
- * An A2E buffer is realeased when it has been read by the embbeded side. This is
+ * An A2E buffer is released when it has been read by the embbeded side. This is
  * used before giving back a buffer to upper layer, or before deleting a buffer
  * when aml_ipc_buf_dealloc() cannot be used.
  */
@@ -304,5 +303,6 @@ int aml_rx_task(void *data);
 int aml_tx_task(void *data);
 int aml_msg_task(void *data);
 int aml_tx_cfm_task(void *data);
+void aml_tx_cfm_param_init(struct aml_hw *aml_hw);
 
 #endif /* _AML_IPC_UTILS_H_ */

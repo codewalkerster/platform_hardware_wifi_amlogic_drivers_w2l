@@ -178,6 +178,12 @@ const char *const aml_mm_other_id2str[MM_SUB_A2E_MAX] = {
     [MM_SUB_TX_FLUSH]                = "MM_SUB_TX_FLUSH",
     [MM_SUB_SET_SUSPEND_FW_TRACE]    = "MM_SUB_SET_SUSPEND_FW_TRACE",
     [MM_SUB_SET_CCA_TIMER]           = "MM_SUB_SET_CCA_TIMER",
+    [MM_SUB_SET_AGG_REQ]             = "MM_SUB_SET_AGG_REQ",
+    [MM_SUB_SDIO_REC_DETECT]         = "MM_SUB_SDIO_REC_DETECT",
+    [MM_SUB_SET_PROT_TYPE]           = "MM_SUB_SET_PROT_TYPE",
+    [MM_SUB_TRIG_SEC_TEST]           = "MM_SUB_TRIG_SEC_TEST",
+    [MM_SUB_SET_RX_BW_NSS]           = "MM_SUB_SET_RX_BW_NSS",
+    [MM_SUB_REGDOM_EN]               = "MM_SUB_REGDOM_EN",
 };
 
 static const char *const aml_dbgid2str[MSG_I(DBG_MAX)] = {

@@ -19,6 +19,8 @@
 #include "ipc_shared.h"
 #include "ipc_compat.h"
 
+struct aml_hw;
+
 /*
  * ENUMERATION
  ******************************************************************************
@@ -49,9 +51,6 @@ struct ipc_host_cb_tag
 {
     /// WLAN driver call-back function: send_data_cfm
     int (*send_data_cfm)(void *pthis, void *host_id);
-
-    /// WLAN driver call-back function: recv_data_ind
-    uint8_t (*recv_data_ind)(void *pthis, void *host_id);
 
     /// WLAN driver call-back function: recv_radar_ind
     uint8_t (*recv_radar_ind)(void *pthis, void *host_id);
@@ -397,7 +396,7 @@ void *ipc_host_tx_host_id_to_ptr_for_sdio_usb(struct ipc_host_env_tag *env, uint
 void ipc_host_irq_ext(struct ipc_host_env_tag *env, uint32_t status);
 void ipc_host_rxdesc_handler(struct ipc_host_env_tag *env);
 void ipc_host_txcfm_handler(struct ipc_host_env_tag *env);
-void aml_get_dbg_info(struct aml_hw *aml_hw);
+uint8_t aml_get_dbg_info(struct aml_hw *aml_hw);
 
 struct debug_push_msginfo {
     u32 time;
@@ -419,4 +418,6 @@ struct aml_txdesc_trigger {
     u8 dynamic_cnt;
     u8 tx_pcie_ths;
 };
+
+extern unsigned char g_pci_msg_suspend;
 #endif // _IPC_HOST_H_

@@ -690,8 +690,9 @@ static void aml_set_ppe_threshold(struct aml_hw *aml_hw,
                                                };
     u8_l* ppe_thres_info_ptr = (u8_l*) &ppe_thres_info;
     u16_l* ppe_thres_ptr = NULL;
-    u8_l  j, cnt, offset;
-    int i = 0;
+    u8_l  j, cnt;
+    int i = 0, offset;
+    int quotient, remainder;
 
     if (aml_hw->mod_params->use_80)
     {
@@ -713,8 +714,12 @@ static void aml_set_ppe_threshold(struct aml_hw *aml_hw,
     {
         for (j = 0; j < cnt; j++) {
             offset = (i * cnt + j) * PPE_THRES_INFO_BIT_LEN + PPE_THRES_INFO_OFT;
-            ppe_thres_ptr = (u16_l*)&he_cap->ppe_thres[offset / 8];
-            *ppe_thres_ptr |= *ppe_thres_info_ptr << (offset % 8);
+            quotient = offset / 8;
+            remainder = offset % 8;
+            if (quotient < (IEEE80211_HE_PPE_THRES_MAX_LEN - 1)) {
+                ppe_thres_ptr = (u16_l*)&he_cap->ppe_thres[quotient];
+                *ppe_thres_ptr |= *ppe_thres_info_ptr << remainder;
+            }
         }
     }
 }
@@ -1053,7 +1058,7 @@ void aml_set_he_capa(struct aml_hw *aml_hw, struct wiphy *wiphy)
      * Disabled by default, should enable it when doing WFA test.
      * Cause the WFA brcm98 STA will inspect these two fields to determine
      * whether carry HE capabilities IE in ASSOC request frame or not.
-     * */
+     */
     he_cap->he_cap_elem.mac_cap_info[0] |= IEEE80211_HE_MAC_CAP0_HTC_HE;
     he_cap->he_cap_elem.mac_cap_info[3] |= IEEE80211_HE_MAC_CAP3_OMI_CONTROL;
 #endif // CONFIG_AML_WFA_CERT_MODE
@@ -1111,7 +1116,7 @@ static void aml_set_rf_params(struct aml_hw *aml_hw, struct wiphy *wiphy)
 #ifndef CONFIG_AML_SDM
     struct ieee80211_supported_band *band_5GHz = wiphy->bands[NL80211_BAND_5GHZ];
     u32 mdm_phy_cfg = __MDM_PHYCFG_FROM_VERS(aml_hw->version_cfm.version_phy_1);
-    struct aml_cfg_phy phy_conf;
+    struct aml_cfg_phy phy_conf = {0};
 
     /*
      * Get configuration file depending on the RF
@@ -1168,20 +1173,83 @@ static void aml_set_rf_params(struct aml_hw *aml_hw, struct wiphy *wiphy)
 #endif /* CONFIG_AML_SDM */
 }
 
-extern unsigned char g_chip_function_ctrl;
-void disable_chip_function(struct aml_hw *aml_hw) {
-    AML_INFO("function ctrl:%02x\n", g_chip_function_ctrl);
 
-    if (g_chip_function_ctrl & CHIP_FUNCTION_DISABLE_11AX) {
+extern struct ieee80211_rate aml_ratetable[];
+void aml_set_wiphy_hw_mode_params(struct aml_hw *aml_hw, struct wiphy *wiphy)
+{
+    if (aml_hw->hw_mode == AML_HW_MODE_B) {
+        wiphy->bands[NL80211_BAND_2GHZ]->n_bitrates = 4;
+        aml_hw->mod_params->ht_on = false;
+        aml_hw->mod_params->vht_on = false;
         aml_hw->mod_params->he_on = false;
+        aml_hw->mod_params->he_ul_on = false;
+        aml_hw->mod_params->use_80 = false;
+        aml_hw->mod_params->use_2040 = false;
+
+    } else if(aml_hw->hw_mode == AML_HW_MODE_BG) {
+        aml_hw->mod_params->ht_on = false;
+        aml_hw->mod_params->ht_on = false;
+        aml_hw->mod_params->vht_on = false;
+        aml_hw->mod_params->he_on = false;
+        aml_hw->mod_params->he_ul_on = false;
+        aml_hw->mod_params->use_80 = false;
+        aml_hw->mod_params->use_2040 = false;
+    } else if(aml_hw->hw_mode == AML_HW_MODE_BGN) {
+        aml_hw->mod_params->ht_on = true;
+        aml_hw->mod_params->vht_on = false;
+        aml_hw->mod_params->he_on = false;
+        aml_hw->mod_params->he_ul_on = false;
+        aml_hw->mod_params->use_80 = false;
+        aml_hw->mod_params->use_2040 = false;
+
+    }   else if(aml_hw->hw_mode == AML_HW_MODE_A) {
+        aml_hw->mod_params->ht_on = false;
+        aml_hw->mod_params->vht_on = false;
+        aml_hw->mod_params->he_on = false;
+        aml_hw->mod_params->he_ul_on = false;
+        aml_hw->mod_params->use_80 = false;
+        aml_hw->mod_params->use_2040 = false;
+
+    }   else if(aml_hw->hw_mode == AML_HW_MODE_AN) {
+
+        aml_hw->mod_params->ht_on = true;
+        aml_hw->mod_params->vht_on = false;
+        aml_hw->mod_params->he_on = false;
+        aml_hw->mod_params->he_ul_on = false;
+        aml_hw->mod_params->use_80 = false;
+        aml_hw->mod_params->use_2040 = false;
+    } else if(aml_hw->hw_mode == AML_HW_MODE_AN_AC) {
+
+        aml_hw->mod_params->ht_on = true;
+        aml_hw->mod_params->vht_on = true;
+        aml_hw->mod_params->he_on = false;
+        aml_hw->mod_params->he_ul_on = false;
+        aml_hw->mod_params->use_80 = false;
+        aml_hw->mod_params->use_2040 = false;
+    } else if(aml_hw->hw_mode == AML_HW_MODE_MIXED) {
+
+        aml_hw->mod_params->ht_on = true;
+        aml_hw->mod_params->vht_on = true;
+        aml_hw->mod_params->he_on = true;
+        aml_hw->mod_params->he_ul_on = true;
+        aml_hw->mod_params->use_80 = true;
+        aml_hw->mod_params->use_2040 = true;
     }
+    /* Set VHT capabilities */
+    aml_set_vht_capa(aml_hw, wiphy);
+
+    /* Set HE capabilities */
+    aml_set_he_capa(aml_hw, wiphy);
+
+    /* Set HT capabilities */
+    aml_set_ht_capa(aml_hw, wiphy);
+
 }
 
 int aml_handle_dynparams(struct aml_hw *aml_hw, struct wiphy *wiphy)
 {
     int ret;
 
-    disable_chip_function(aml_hw);
     /* Check compatibility between requested parameters and HW/SW features */
     ret = aml_check_fw_hw_feature(aml_hw, wiphy);
     if (ret)
@@ -1195,15 +1263,7 @@ int aml_handle_dynparams(struct aml_hw *aml_hw, struct wiphy *wiphy)
     /* Set wiphy parameters */
     aml_set_wiphy_params(aml_hw, wiphy);
 
-    /* Set VHT capabilities */
-    aml_set_vht_capa(aml_hw, wiphy);
-
-    /* Set HE capabilities */
-    aml_set_he_capa(aml_hw, wiphy);
-
-    /* Set HT capabilities */
-    aml_set_ht_capa(aml_hw, wiphy);
-
+    aml_set_wiphy_hw_mode_params(aml_hw, wiphy);
     /* Set RF specific parameters (shall be done last as it might change some
        capabilities previously set) */
     aml_set_rf_params(aml_hw, wiphy);
@@ -1216,11 +1276,7 @@ void aml_custregd(struct aml_hw *aml_hw, struct wiphy *wiphy)
     if (!aml_hw->mod_params->custregd)
         return;
 
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(6, 3, 12)
     wiphy->regulatory_flags |= REGULATORY_IGNORE_STALE_KICKOFF;
-#else
-    wiphy->regulatory_flags |= (REGULATORY_WIPHY_SELF_MANAGED >> 1);
-#endif
     wiphy->regulatory_flags |= REGULATORY_WIPHY_SELF_MANAGED;
 
     rtnl_lock();

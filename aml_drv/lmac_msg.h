@@ -20,6 +20,9 @@
  */
 // for MAC related elements (mac_addr, mac_ssid...)
 #include "lmac_mac.h"
+#ifdef CONFIG_AML_APF
+#include "aml_cfgvendor.h"
+#endif
 
 /*
  ****************************************************************************************
@@ -83,6 +86,8 @@ enum
 #define MDNS_RAW_DATA_LENGTH_MAX    492
 #define MDNS_LIST_CRITERIA_MAX      8
 #define MDNS_QNAME_LENGTH_MAX       256
+/// The len of a label in mdns name
+#define MDNS_NAME_LABL_LEN_MAX      63
 
 #define MAX_SCHED_SCAN_PLANS 1
 #define MAX_MATCH_COUNT 2
@@ -114,6 +119,15 @@ enum ps_mode_state
     PS_D0_STATUS = 0,
     PS_D3_STATUS,
 };
+
+#ifdef CONFIG_AML_APF
+/// APF mode setting
+enum mm_apf_mode_state
+{
+    MM_APF_MODE_OFF,
+    MM_APF_MODE_ON,
+};
+#endif
 
 /// Status/error codes used in the MAC software.
 enum
@@ -400,7 +414,7 @@ enum priv_e2a_tag {
     PRIV_APM_DIS_STA_IND,
     PRIV_EFUSE_GET_RESULT,
     PRIV_DHCP_OFFLOAD_IND,
-    PRIV_SDIO_USB_RECORD_INFO_IND,
+    PRIV_SDIO_USB_REORDER_INFO_IND,
     PRIV_SCC_CONFLICT_CFM,
     PRIV_FT_AUTH_RSP_TIMEOUT_IND,
     PRIV_CSI_STATUS_COM_CFM,
@@ -414,9 +428,12 @@ enum priv_e2a_tag {
     PRIV_MDNS_GET_HIT_CFM,
     PRIV_MDNS_GET_MISS_CFM,
     PRIV_FW2DRV_CSI_STATUS,
-    PRIV_RESUME_RXBUF_PTR_IND,
     PRIV_RESUME_CFM,
     PRIV_RXFAILCNT_CFM,
+    PRIV_APF_GET_CAPABILITIES_CFM,
+    PRIV_APF_GET_STATUS,
+    PRIV_APF_DELETE_PGM,
+    PRIV_GET_WIFI_INFO_CFM,
     PRIV_SUB_E2A_MAX,
 };
 
@@ -493,6 +510,24 @@ enum mm_sub_a2e_tag {
     MM_SUB_ADD_DEFAULT_KEY,
     MM_SUB_SET_SUSPEND_FW_TRACE,
     MM_SUB_SET_CCA_TIMER,
+    MM_SEND_ACTION_REQ,
+    MM_SUB_SET_AGG_REQ,
+    MM_SUB_SDIO_REC_DETECT,
+    MM_SUB_CSI_DATA_DONE,
+    MM_SUB_GET_APF_CAPABILITIES,
+    MM_SUB_ADD_APF_FILTER,
+    MM_SUB_DELETE_APF_FILTER,
+    MM_SUB_SET_APF_MODE,
+    MM_SUB_GET_APF_STATUS,
+    MM_SUB_SET_EARLY_SUSPEND_REQ,
+    MM_SUB_SET_PROT_TYPE,
+    MM_SUB_GET_WIFI_INFO_REQ,
+    MM_SUB_RF_GAIN_SETTING_PAARM_REQ,
+    MM_SUB_RF_CALI_SETTING_PAARM_REQ,
+    MM_SUB_TRIG_SEC_TEST,
+    MM_SUB_SET_RX_BW_NSS,
+    MM_SUB_REGDOM_EN,
+    MM_SUB_PHY_CFG_MASKFILTER_REQ,
     /// the MAX
     MM_SUB_A2E_MAX,
     /// New members cannot be added below
@@ -1116,6 +1151,9 @@ struct csi_fw_status_ind
     u8_l csi_ready_flag;
     u8_l reserved;
     u16_l csi_abnormal_info;
+    u32_l csi_abnormal_debug;
+    u32_l csi_com_data_addr;
+    u32_l csi_sp_data_addr;
 };
 
 /// Structure containing the parameters of the @ref MM_CONNECTION_LOSS_IND message.
@@ -1582,9 +1620,7 @@ struct scanu_macth_set
   //SSID to be matched; may be zero-length in case of BSSID match or no match (RSSI only)
   struct mac_ssid ssId;
   //BSSID to be matched; may be all-zero BSSID in case of SSID match or no match (RSSI only)
-#if CFG80211_VERSION_CODE > KERNEL_VERSION(4,12,0)
   struct mac_addr bssid;
-#endif
   //don't report scan results below this threshold (in s32 dBm)
   int8_t    rssiThreshold;
   //Minimum rssi threshold for each band to be applied
@@ -1615,10 +1651,8 @@ struct scanu_bss_select_adjust {
 /// Structure containing the parameters of the @ref SCANU_SCHED_START_REQ message
 struct scanu_sched_scan_start_req
 {
-#if CFG80211_VERSION_CODE > KERNEL_VERSION(4,12,0)
     //identifies this request.
     uint64_t reqid;
-#endif
     struct scanu_start_req scanu_req;
 
     //number of match sets
@@ -1899,7 +1933,7 @@ struct me_sta_add_req
     u8_l opmode;
     /// Index of the VIF the station is attached to
     u8_l vif_idx;
-    /// Whether the the station is TDLS station
+    /// Whether the station is TDLS station
     bool_l tdls_sta;
     /// Indicate if the station is TDLS link initiator station
     bool_l tdls_sta_initiator;
@@ -1923,7 +1957,7 @@ struct me_sta_del_req
 {
     /// Index of the station to be deleted
     u8_l sta_idx;
-    /// Whether the the station is TDLS station
+    /// Whether the station is TDLS station
     bool_l tdls_sta;
 };
 
@@ -3073,7 +3107,7 @@ struct csi_link_info_ind
     u8_l bw;
     u8_l nss;
     u8_l protocol_mode;
-    u8_l rev;
+    u8_l link_state;
 };
 
 struct csi_com_status_get_ind
@@ -3122,8 +3156,15 @@ struct csi_complex{
 
 struct csi_sp_status_get_ind
 {
+    u32_l csi_mode;
     u32_l data_len;
     struct csi_complex csi[250];
+};
+
+struct csi_all_data_ind
+{
+    struct csi_com_status_get_ind csi_com_data;
+    struct csi_sp_status_get_ind csi_sp_data[4];
 };
 
 struct efuse_read_result_ind {
@@ -3151,16 +3192,20 @@ struct dma_ul_result_ind
 struct coex_get_status
 {
     u8_l coex_state; //TDD or FDD;
-    u8_l work_mode;  // TDD reason;
+    u8_l work_mode_bt;  // TDD reason;
+    u8_l work_mode_15p4;  // TDD reason;
     u8_l tx_agg_num; //the tx agg num coex setting;
     u8_l rx_agg_num; //the rx agg num coex setting;
     u32_l bt_work_status; // bt connect info;
 
-    u32_l wifi_inact_sum;
+    u32_l wifi_inactive_sum;
     u32_l wifi_act_sum;
     u8_l poc_cali_status;
     u8_l link_cali_status;
     u32_l zgb_work_status;
+    u16_l null_data_send_cnt;
+    u8_l null_data_send_succ_cnt_before_bt_s;
+    bool null_data_enable;
 };
 
 struct scan_hang_req
@@ -3306,6 +3351,30 @@ struct cca_timer_t
     int cycle;
 };
 
+enum {
+    AMSDU_TX = BIT(0),
+    AMSDU_RX = BIT(1),
+    AMPDU_TX = BIT(2),
+    AMPDU_RX = BIT(3),
+};
+
+struct agg_req_t
+{
+    u8_l vif_idx;
+    u8_l def_ampdu_tx;
+    u32_l dir;
+    union
+    {
+        struct
+        {
+            u32_l amsdu_tx :8;
+            u32_l amsdu_rx :8;
+            u32_l ampdu_tx :8;
+            u32_l ampdu_rx :8;
+        };
+        u32_l agg_num;
+    };
+};
 
 struct scanu_sched_scan_stop_req
 {
@@ -3495,6 +3564,7 @@ struct wfa_test_req
     bool wfa_set_rts_based_txop_dur;
     bool wfa_set_agg_tx_cnt_thres;
     bool wfa_reset_edca;
+    bool wfa_set_wmm_ie;
 };
 
 #ifdef CONFIG_AML_NAN_SUPPORT
@@ -3508,6 +3578,9 @@ enum nan_msg_tag
     NAN_SUBSCRIBE_REQ,
     NAN_FOLLOW_UP_REQ,
     NAN_UPLOAD_SVC,
+    NAN_DISABLE_REQ,
+    NAN_DISABLE_CFM,
+
     /// MAX number of messages
     NAN_MAX,
 };
@@ -3627,6 +3700,106 @@ struct add_default_key
 struct mm_set_suspend_cfm {
     uint8_t reason;
 };
+
+struct send_action_req
+{
+    u8_l type;
+    u8_l vif_idx;
+};
+
+/// Structure containing the parameters of the @ref MM_SUB_REGDOM_EN message.
+struct regdom_en_req
+{
+    uint32_t reg_en;
+};
+
+
+#ifdef CONFIG_AML_APF
+struct apf_capabilities
+{
+    /// Maximum supported size of APF filter program
+    u32_l max_len;
+    /// Version of APF
+    u16_l version;
+    /// apf program download addr
+    uint32_t apf_mem_addr;
+};
+
+enum apf_pgm_state
+{
+    APF_PROGRAM_INIT = 0,
+    APF_PROGRAM_INSTALLED = 1,
+    APF_PROGRAM_DELETED = 2,
+};
+
+
+struct apf_pgm_status {
+    u8_l apf_status;
+    u8_l resved[3];
+};
+
+/**
+ * struct apf_filter - Android Packet Filter (APF) program configuration
+ * @program_len:    Length of the APF filter program (in bytes)
+ * @fw_copy_addr:   Temporary buffer address in firmware memory for SDIO alignment workaround
+ *                  When the host downloads APF programs via SDIO, transfers are constrained to
+ *                  4-byte or 512-byte alignment. For unaligned programs, the host automatically
+ *                  pads the data, which could corrupt APF memory. This field specifies where to
+ *                  store unaligned/padded program fragments before firmware copies them byte-for-byte
+ *                  to the final APF memory.
+ * @fw_copy_len:    Length of data (in bytes) that needs to be copied from fw_copy_addr to APF memory
+ * @need_fw_copy:   Flag indicating whether firmware-assisted copy is required:
+ *                  - true:  SDIO transfer contains padding, firmware must perform byte-wise copy
+ *                  - false: Program is already aligned, direct APF memory write can be used
+ */
+struct apf_filter
+{
+    u32_l program_len;
+    u32_l fw_copy_addr;
+    u32_l fw_copy_len;
+    bool need_fw_copy;
+};
+
+struct apf_set_mode_req
+{
+    bool apf_mode; // Boolean flag to enable (true) or disable (false) the APF feature
+    u8_l resvd[3];
+};
+
+struct apf_get_status_req
+{
+    u32_l filter_age_16384ths; // the number of 1/16384 seconds since the filter was programmed.
+    bool apf_status;
+    u8_l resvd[3];
+};
+
+struct early_suspend_mode_req
+{
+    bool early_suspend_mode;
+    u8_l resvd[3];
+};
+#endif
+
+static inline int is_mdnsoffload_msg(uint32_t id)
+{
+    switch (id) {
+    case MDNS_SET_STATE:
+    case MDNS_SET_BEHAVIOR:
+    case MDNS_ADD_PROTOCOL:
+    case MDNS_REMOVE_PROTOCOL:
+    case MDNS_GET_HIT:
+    case MDNS_GET_MISS:
+    case MDNS_ADD_PASS_LIST:
+    case MDNS_REMOVE_PASS_LIST:
+    case MDNS_RESET_ALL:
+    case MDNS_ADD_PROTOCOL_STATUS:
+        return 1;
+    default:
+        return 0;
+    }
+    return 0;
+}
+
 #endif // LMAC_MSG_H_
 
 

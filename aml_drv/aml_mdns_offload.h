@@ -14,13 +14,16 @@
 #include <net/cfg80211.h>
 #include <net/netlink.h>
 #include "aml_defs.h"
+#include "aml_cfgvendor.h"
 
 typedef uint32_t u32_boolean;
 
 #define u32_true 1
 #define u32_false 0
 
-#define GOOGLE_VENDOR_OUI 0x1A11
+/// The maximum number of response data that can be added
+#define MDNS_INDEX_ERR              (-1)
+#define MDNS_INDEX_MAX              (3)
 
 typedef enum {
     WIFI_MDNS_OFFLOAD_SET_STATE = 0x1664,
@@ -138,50 +141,56 @@ extern const struct nla_policy mdns_offload_attr_policy[];
     DEFINE_MDNS_OFFLOAD_ATTR_POLICY;\
     const struct MDNS_OFFLOAD_OPS mdns_offload_ops
 
-static inline char *__mdnsOffload_decode_qname(unsigned char *buf,
-    uint32_t buf_len, uint32_t offset)
+static inline char *__mdnsOffload_decode_qname(const uint8_t *buf,
+    uint32_t buf_len, int offset)
 {
     char *qname = NULL;
-    unsigned char *p = NULL, *c = NULL;
-    uint32_t n = 0, i = 0;
+    const uint8_t *p = NULL;
+    uint16_t location = 0;
+    uint32_t ptr_count = 0;
+    uint32_t label_len = 0;
+    uint32_t total_len = 0;
 
     if (!buf || buf_len < 1 || offset < 0 || offset > buf_len - 1)
         goto err;
     p = buf + offset;
     if (*p == 0)
         goto err;
-    qname = (char *)kmalloc(256, GFP_KERNEL);
+    qname = (char *)kmalloc(MDNS_QNAME_LENGTH_MAX, GFP_KERNEL);
     if (!qname) {
-        AML_ERR("mdnsOffload: alloc failed!\n");
+        AML_M_ERR(MDNS, "mdnsOffload: alloc failed!\n");
         return NULL;
     }
-    memset(qname, 0, 256);
-    c = (unsigned char *)qname;
+    memset(qname, 0, MDNS_QNAME_LENGTH_MAX);
     while (*p) {
-        if ((*p >> 6) == 0x03) {
-            n = (((*p << 8) | *(p + 1)) & 0x3fff);
-            if (n > (buf_len - 1))
+        if ((*p & 0xC0) == 0xC0) {
+            if (ptr_count++ > 10)
                 goto err;
-            p = buf + n;
+            location = ((*p << 8) | *(p + 1)) & 0x3fff;
+            if (location > (buf_len - 1))
+                goto err;
+            p = buf + location;
             continue;
         }
-        n = *p;
-        if (p + n > buf + buf_len - 1)
+        label_len = *p++;
+        if (label_len > MDNS_NAME_LABL_LEN_MAX
+          || total_len + label_len + 1 > MDNS_QNAME_LENGTH_MAX
+          || p + label_len > buf + buf_len)
             goto err;
-        p++;
-        for (i = 0; i < n; i++) {
-            if (*p > 32 && *p < 127)
-                *c++ = *p++;
-            else
-                goto err;
-        }
-        if (*p != 0)
-            *c++ = '.';
+        memcpy(qname + total_len, p, label_len);
+        p += label_len;
+        total_len += label_len;
+        qname[total_len++] = '.';
     }
+    if (total_len > 0)
+        qname[total_len-1] = '\0';
+    else
+        qname[0] = '\0';
     return qname;
 err:
-    AML_ERR("mdnsOffload: decode qname failed!\n");
-    kfree(qname);
+    AML_M_ERR(MDNS, "mdnsOffload: decode qname failed!\n");
+    if (qname)
+        kfree(qname);
     return NULL;
 }
 
@@ -192,13 +201,13 @@ static inline void __mdnsOffload_dump_msg(unsigned char *buf,
     uint32_t n = 0;
     unsigned char *dump = NULL;
 
-    dump = (unsigned char *)kmalloc(256, GFP_KERNEL);
+    dump = (unsigned char *)kmalloc(MDNS_QNAME_LENGTH_MAX, GFP_KERNEL);
     if (!dump) {
-        AML_ERR("mdnsOffload: alloc failed!\n");
+        AML_M_ERR(MDNS, "mdnsOffload: alloc failed!\n");
         return;
     }
     for (i = 0; i < len; i++) {
-        memset(dump, 0, 256);
+        memset(dump, 0, MDNS_QNAME_LENGTH_MAX);
         n = 0;
         n += sprintf(dump + n, "%04x|", i);
         for (j = i; j < i + line; j++) {
@@ -217,11 +226,14 @@ static inline void __mdnsOffload_dump_msg(unsigned char *buf,
             else
                 n += sprintf(dump + n, ".");
         }
-        AML_WARN("%s\n", dump);
+        AML_M_INFO(MDNS, "%s\n", dump);
         i = i + line - 1;
     }
-    kfree(dump);
-    dump = NULL;
+    if (dump) {
+        kfree(dump);
+        /* coverity[assigned_pointer] - for debug print ignore */
+        dump = NULL;
+    }
 }
 
 static inline int __mdnsOffload_send_vendor_cmd_reply(struct wiphy *wiphy,
@@ -233,7 +245,7 @@ static inline int __mdnsOffload_send_vendor_cmd_reply(struct wiphy *wiphy,
 
     skb = cfg80211_vendor_cmd_alloc_reply_skb(wiphy, len);
     if (unlikely(!skb)) {
-        AML_ERR("skb alloc failed!\n");
+        AML_M_ERR(MDNS, "skb alloc failed!\n");
         err = -ENOMEM;
         goto exit;
     }
@@ -242,7 +254,7 @@ static inline int __mdnsOffload_send_vendor_cmd_reply(struct wiphy *wiphy,
     nla_put(skb, NL80211_ATTR_VENDOR_DATA, len, data);
     err = cfg80211_vendor_cmd_reply(skb);
     if (err)
-        AML_ERR("cfg80211_vendor_cmd_reply failed!ret=%d\n", err);
+        AML_M_ERR(MDNS, "cfg80211_vendor_cmd_reply failed!ret=%d\n", err);
 exit:
     return err;
 }
@@ -251,7 +263,6 @@ static inline int __mdnsOffload_setOffloadState(struct wiphy *wiphy,
     struct wireless_dev *wdev, const void *data, int len)
 {
     struct aml_hw *aml_hw = wiphy_priv(wiphy);
-    struct aml_vif *vif = netdev_priv(wdev->netdev);
     int rem, type, err = 0;
     const struct nlattr *iter;
     u32_boolean enabled = 0;
@@ -260,14 +271,14 @@ static inline int __mdnsOffload_setOffloadState(struct wiphy *wiphy,
 
     nla_for_each_attr(iter, data, len, rem) {
         type = nla_type(iter);
-        //printk("mdnsOffload: attr type:%d\n", type);
+        //AML_M_INFO(MDNS, "mdnsOffload: attr type:%d\n", type);
         switch (type) {
             case WIFI_MDNS_OFFLOAD_ATTRIBUTE_STATE:
                 enabled = nla_get_u32(iter);
                 p_enabled = &enabled;
                 break;
             default:
-                AML_ERR("mdnsOffload: unknown type:%d\n", type);
+                AML_M_ERR(MDNS, "mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
@@ -275,21 +286,21 @@ static inline int __mdnsOffload_setOffloadState(struct wiphy *wiphy,
         err = -EINVAL;
         goto exit;
     }
-    AML_INFO("mdnsOffload: setOffloadState: enabled:%d\n", enabled);
+    AML_M_INFO(MDNS, "mdnsOffload: setOffloadState: enabled:%d\n", enabled);
     if (mdns_offload_ops.setOffloadState) {
         reply = mdns_offload_ops.setOffloadState(aml_hw, (u32_boolean)enabled);
-        AML_INFO("mdnsOffload: setOffloadState: reply:%u\n", reply);
+        AML_M_INFO(MDNS, "mdnsOffload: setOffloadState: reply:%u\n", reply);
         err = __mdnsOffload_send_vendor_cmd_reply(wiphy,
             WIFI_MDNS_OFFLOAD_SET_STATE,
             &reply, sizeof(reply));
     } else {
-        AML_INFO("mdnsOffload: setOffloadState: unsupported!\n");
+        AML_M_INFO(MDNS, "mdnsOffload: setOffloadState: unsupported!\n");
         err = -EPERM;
         goto exit;
     }
 exit:
     if (err)
-        AML_ERR("mdnsOffload: setOffloadState: failed!err:%d\n", err);
+        AML_M_ERR(MDNS, "mdnsOffload: setOffloadState: failed!err:%d\n", err);
     return err;
 }
 
@@ -297,20 +308,19 @@ static inline int __mdnsOffload_resetAll(struct wiphy *wiphy,
     struct wireless_dev *wdev, const void *data, int len)
 {
     struct aml_hw *aml_hw = wiphy_priv(wiphy);
-    struct aml_vif *vif = netdev_priv(wdev->netdev);
     int err = 0;
 
-    AML_WARN("mdnsOffload: resetAll\n");
+    AML_M_WARN(MDNS, "mdnsOffload: resetAll\n");
     if (mdns_offload_ops.resetAll)
         mdns_offload_ops.resetAll(aml_hw);
     else {
-        AML_INFO("mdnsOffload: resetAll: unsupported!\n");
+        AML_M_INFO(MDNS, "mdnsOffload: resetAll: unsupported!\n");
         err = -EPERM;
         goto exit;
     }
 exit:
     if (err)
-        AML_ERR("mdnsOffload: resetAll: failed!err=%d\n", err);
+        AML_M_ERR(MDNS, "mdnsOffload: resetAll: failed!err=%d\n", err);
     return err;
 }
 
@@ -318,7 +328,6 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
     struct wireless_dev *wdev, const void *data, int len)
 {
     struct aml_hw *aml_hw = wiphy_priv(wiphy);
-    struct aml_vif *vif = netdev_priv(wdev->netdev);
     int rem, type, err = 0, i = 0, size = 0;
     const struct nlattr *iter;
     char ifname[32];
@@ -335,7 +344,7 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
     memset(&offloadData, 0, sizeof(offloadData));
     nla_for_each_attr(iter, data, len, rem) {
         type = nla_type(iter);
-        //printk("mdnsOffload: attr type:%d\n", type);
+        //AML_M_INFO(MDNS, "mdnsOffload: attr type:%d\n", type);
         switch (type) {
             case WIFI_MDNS_OFFLOAD_ATTRIBUTE_NETWORK_INTERFACE:
                 strncpy(ifname, (char *)nla_data(iter), sizeof(ifname) - 1);
@@ -346,10 +355,10 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
                 p_pkt_len = &pkt_len;
                 break;
             case WIFI_MDNS_OFFLOAD_ATTRIBUTE_OFFLOAD_PKT_DATA:
-                if (pkt_len > 0) {
+                if ((pkt_len > 0) && (!pkt_data)) {
                     pkt_data = (unsigned char *)kmalloc(pkt_len, GFP_KERNEL);
                     if (!pkt_data) {
-                        AML_ERR("mdnsOffload: alloc failed!\n");
+                        AML_M_ERR(MDNS, "mdnsOffload: alloc failed!\n");
                         err = -ENOMEM;
                         goto exit;
                     }
@@ -362,11 +371,11 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
                 p_criteriaListNum = &criteriaListNum;
                 break;
             case WIFI_MDNS_OFFLOAD_ATTRIBUTE_MATCH_CRITERIA_DATA:
-                if (criteriaListNum > 0) {
+                if ((criteriaListNum > 0) && (!criteriaList)) {
                     size = criteriaListNum * sizeof(matchCriteria);
                     criteriaList = (matchCriteria *)kmalloc(size, GFP_KERNEL);
                     if (!criteriaList) {
-                        AML_ERR("mdnsOffload: alloc failed!\n");
+                        AML_M_ERR(MDNS, "mdnsOffload: alloc failed!\n");
                         err = -ENOMEM;
                         goto exit;
                     }
@@ -375,7 +384,7 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
                 }
                 break;
             default:
-                AML_ERR("mdnsOffload: unknown type:%d\n", type);
+                AML_M_ERR(MDNS, "mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
@@ -385,32 +394,33 @@ static inline int __mdnsOffload_addProtocolResponses(struct wiphy *wiphy,
         goto exit;
     }
 
-    AML_INFO("mdnsOffload: addProtocolResponses: pkt_len:%u\n", pkt_len);
-    AML_INFO("mdnsOffload: addProtocolResponses: criteriaListNum:%u\n",
+    AML_M_INFO(MDNS, "mdnsOffload: addProtocolResponses: pkt_len:%u\n", pkt_len);
+    AML_M_INFO(MDNS, "mdnsOffload: addProtocolResponses: criteriaListNum:%u\n",
         criteriaListNum);
     for (i = 0; i < criteriaListNum; i++) {
+        /* coverity[value_overwrite] - ignore */
         qname = __mdnsOffload_decode_qname(pkt_data, pkt_len,
             criteriaList[i].nameOffset);
-        AML_INFO("%d. type:%d\tnameOffset:%d\tname:%s\n", i + 1,
+        AML_M_INFO(MDNS, "%d. type:%d\tnameOffset:%d\tname:%s\n", i + 1,
             criteriaList[i].type,
             criteriaList[i].nameOffset,
             (qname && strlen(qname) > 0) ? qname : "none");
         kfree(qname);
         qname = NULL;
     }
-    //__mdnsOffload_dump_msg(pkt_data, pkt_len);
+    __mdnsOffload_dump_msg(pkt_data, pkt_len);
     if (mdns_offload_ops.addProtocolResponses) {
         offloadData.rawOffloadPacketLen = pkt_len;
         offloadData.rawOffloadPacket = pkt_data;
         offloadData.matchCriteriaListNum = criteriaListNum;
         offloadData.matchCriteriaList = criteriaList;
         reply = mdns_offload_ops.addProtocolResponses(aml_hw, ifname, &offloadData);
-        AML_INFO("mdnsOffload: addProtocolResponses: reply:%d\n", reply);
+        AML_M_INFO(MDNS, "mdnsOffload: addProtocolResponses: reply:%d\n", reply);
         err = __mdnsOffload_send_vendor_cmd_reply(wiphy,
             WIFI_MDNS_OFFLOAD_ADD_PROTOCOL_RESPONSES,
             &reply, sizeof(reply));
     } else {
-        AML_INFO("mdnsOffload: addProtocolResponses: unsupported!\n");
+        AML_M_INFO(MDNS, "mdnsOffload: addProtocolResponses: unsupported!\n");
         err = -EPERM;
         goto exit;
     }
@@ -421,7 +431,7 @@ exit:
         kfree(criteriaList);
 
     if (err)
-        AML_ERR("mdnsOffload: addProtocolResponses: failed!err:%d\n", err);
+        AML_M_ERR(MDNS, "mdnsOffload: addProtocolResponses: failed!err:%d\n", err);
     return err;
 }
 
@@ -429,23 +439,22 @@ static inline int __mdnsOffload_removeProtocolResponses(struct wiphy *wiphy,
     struct wireless_dev *wdev, const void *data, int len)
 {
     struct aml_hw *aml_hw = wiphy_priv(wiphy);
-    struct aml_vif *vif = netdev_priv(wdev->netdev);
     int rem, type, err = 0;
     const struct nlattr *iter;
     int recordKey = -1;
     int *p_recordKey = NULL;
 
-    AML_INFO("mdnsOffload: removeProtocolResponses\n");
+    AML_M_INFO(MDNS, "mdnsOffload: removeProtocolResponses\n");
     nla_for_each_attr(iter, data, len, rem) {
         type = nla_type(iter);
-        //printk("mdnsOffload: attr type:%d\n", type);
+        //AML_M_INFO(MDNS, "mdnsOffload: attr type:%d\n", type);
         switch (type) {
             case WIFI_MDNS_OFFLOAD_ATTRIBUTE_RECORD_KEY:
                 recordKey = nla_get_u32(iter);
                 p_recordKey = &recordKey;
                 break;
             default:
-                AML_ERR("mdnsOffload: unknown type:%d\n", type);
+                AML_M_ERR(MDNS, "mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
@@ -453,18 +462,18 @@ static inline int __mdnsOffload_removeProtocolResponses(struct wiphy *wiphy,
         err = -EINVAL;
         goto exit;
     }
-    AML_INFO("mdnsOffload: removeProtocolResponses: recordKey:%d\n",
+    AML_M_INFO(MDNS, "mdnsOffload: removeProtocolResponses: recordKey:%d\n",
         recordKey);
     if (mdns_offload_ops.removeProtocolResponses) {
         mdns_offload_ops.removeProtocolResponses(aml_hw, recordKey);
     } else {
-        AML_INFO("mdnsOffload: removeProtocolResponses: unsupported!\n");
+        AML_M_INFO(MDNS, "mdnsOffload: removeProtocolResponses: unsupported!\n");
         err = -EPERM;
         goto exit;
     }
 exit:
     if (err)
-        AML_ERR("mdnsOffload: removeProtocolResponses: failed!err:%d\n", err);
+        AML_M_ERR(MDNS, "mdnsOffload: removeProtocolResponses: failed!err:%d\n", err);
     return err;
 }
 
@@ -472,7 +481,6 @@ static inline int __mdnsOffload_getAndResetHitCounter(struct wiphy *wiphy,
     struct wireless_dev *wdev, const void *data, int len)
 {
     struct aml_hw *aml_hw = wiphy_priv(wiphy);
-    struct aml_vif *vif = netdev_priv(wdev->netdev);
     int rem, type, err = 0;
     const struct nlattr *iter;
     int recordKey = -1;
@@ -481,14 +489,14 @@ static inline int __mdnsOffload_getAndResetHitCounter(struct wiphy *wiphy,
 
     nla_for_each_attr(iter, data, len, rem) {
         type = nla_type(iter);
-        //printk("mdnsOffload: attr type:%d\n", type);
+        //AML_M_INFO(MDNS, "mdnsOffload: attr type:%d\n", type);
         switch (type) {
             case WIFI_MDNS_OFFLOAD_ATTRIBUTE_RECORD_KEY:
                 recordKey = nla_get_u32(iter);
                 p_recordKey = &recordKey;
                 break;
             default:
-                AML_ERR("mdnsOffload: unknown type:%d\n", type);
+                AML_M_ERR(MDNS, "mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
@@ -496,22 +504,22 @@ static inline int __mdnsOffload_getAndResetHitCounter(struct wiphy *wiphy,
         err = -EINVAL;
         goto exit;
     }
-    AML_INFO("mdnsOffload: getAndResetHitCounter: recordKey:%d\n",
+    AML_M_INFO(MDNS, "mdnsOffload: getAndResetHitCounter: recordKey:%d\n",
         recordKey);
     if (mdns_offload_ops.getAndResetHitCounter) {
         reply = mdns_offload_ops.getAndResetHitCounter(aml_hw, recordKey);
-        //AML_INFO("mdnsOffload: getAndResetHitCounter: reply:%d\n", reply);
+        AML_M_INFO(MDNS, "mdnsOffload: getAndResetHitCounter: reply:%d\n", reply);
         err = __mdnsOffload_send_vendor_cmd_reply(wiphy,
             WIFI_MDNS_OFFLOAD_GET_AND_RESET_HIT_COUNTER,
             &reply, sizeof(reply));
     } else {
-        AML_INFO("mdnsOffload: getAndResetHitCounter: unsupported!\n");
+        AML_M_INFO(MDNS, "mdnsOffload: getAndResetHitCounter: unsupported!\n");
         err = -EPERM;
         goto exit;
     }
 exit:
     if (err)
-        AML_ERR("mdnsOffload: getAndResetHitCounter: failed!err:%d\n", err);
+        AML_M_ERR(MDNS, "mdnsOffload: getAndResetHitCounter: failed!err:%d\n", err);
     return err;
 }
 
@@ -519,24 +527,23 @@ static inline int __mdnsOffload_getAndResetMissCounter(struct wiphy *wiphy,
     struct wireless_dev *wdev, const void *data, int len)
 {
     struct aml_hw *aml_hw = wiphy_priv(wiphy);
-    struct aml_vif *vif = netdev_priv(wdev->netdev);
     int err = 0;
     int reply = 0;
 
     if (mdns_offload_ops.getAndResetMissCounter) {
         reply = mdns_offload_ops.getAndResetMissCounter(aml_hw);
-        AML_INFO("mdnsOffload: getAndResetMissCounter: reply:%d\n", reply);
+        AML_M_INFO(MDNS, "mdnsOffload: getAndResetMissCounter: reply:%d\n", reply);
         err = __mdnsOffload_send_vendor_cmd_reply(wiphy,
             WIFI_MDNS_OFFLOAD_GET_AND_RESET_MISS_COUNTER,
             &reply, sizeof(reply));
     } else {
-        //AML_INFO("mdnsOffload: getAndResetMissCounter: unsupported!\n");
+        AML_M_INFO(MDNS, "mdnsOffload: getAndResetMissCounter: unsupported!\n");
         err = -EPERM;
         goto exit;
     }
 exit:
     if (err)
-         AML_ERR("mdnsOffload: getAndResetMissCounter: failed!err:%d\n", err);
+         AML_M_ERR(MDNS, "mdnsOffload: getAndResetMissCounter: failed!err:%d\n", err);
     return err;
 }
 
@@ -544,7 +551,6 @@ static inline int __mdnsOffload_addToPassthroughList(struct wiphy *wiphy,
     struct wireless_dev *wdev, const void *data, int len)
 {
     struct aml_hw *aml_hw = wiphy_priv(wiphy);
-    struct aml_vif *vif = netdev_priv(wdev->netdev);
     int rem, type, err = 0;
     const struct nlattr *iter;
     char ifname[32];
@@ -557,7 +563,7 @@ static inline int __mdnsOffload_addToPassthroughList(struct wiphy *wiphy,
     memset(qname, 0, sizeof(qname));
     nla_for_each_attr(iter, data, len, rem) {
         type = nla_type(iter);
-        //printk("mdnsOffload: attr type:%d\n", type);
+        //AML_M_INFO(MDNS, "mdnsOffload: attr type:%d\n", type);
         switch (type) {
             case WIFI_MDNS_OFFLOAD_ATTRIBUTE_NETWORK_INTERFACE:
                 strncpy(ifname, (char *)nla_data(iter), sizeof(ifname) - 1);
@@ -568,7 +574,7 @@ static inline int __mdnsOffload_addToPassthroughList(struct wiphy *wiphy,
                 p_qname = qname;
                 break;
             default:
-                AML_ERR("mdnsOffload: unknown type:%d\n", type);
+                AML_M_ERR(MDNS, "mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
@@ -576,21 +582,21 @@ static inline int __mdnsOffload_addToPassthroughList(struct wiphy *wiphy,
         err = -EINVAL;
         goto exit;
     }
-    AML_INFO("mdnsOffload: addToPassthroughList: length:%d qname:%s\n", strlen(qname), qname);
+    AML_M_INFO(MDNS, "mdnsOffload: addToPassthroughList: length:%d qname:%s\n", strlen(qname), qname);
     if (mdns_offload_ops.addToPassthroughList) {
         reply = mdns_offload_ops.addToPassthroughList(aml_hw, ifname, qname);
-        //AML_INFO("mdnsOffload: addToPassthroughList: reply:%u\n", reply);
+        AML_M_INFO(MDNS, "mdnsOffload: addToPassthroughList: reply:%u\n", reply);
         err = __mdnsOffload_send_vendor_cmd_reply(wiphy,
             WIFI_MDNS_OFFLOAD_ADD_TO_PASSTHROUGH_LIST,
             &reply, sizeof(reply));
     } else {
-        AML_INFO("mdnsOffload: addToPassthroughList: unsupported!\n");
+        AML_M_INFO(MDNS, "mdnsOffload: addToPassthroughList: unsupported!\n");
         err = -EPERM;
         goto exit;
     }
 exit:
     if (err)
-         AML_ERR("mdnsOffload: addToPassthroughList: failed!err:%d\n", err);
+         AML_M_ERR(MDNS, "mdnsOffload: addToPassthroughList: failed!err:%d\n", err);
     return err;
 }
 
@@ -598,7 +604,6 @@ static inline int __mdnsOffload_removeFromPassthroughList(struct wiphy *wiphy,
     struct wireless_dev *wdev, const void *data, int len)
 {
     struct aml_hw *aml_hw = wiphy_priv(wiphy);
-    struct aml_vif *vif = netdev_priv(wdev->netdev);
     int rem, type, err = 0;
     const struct nlattr *iter;
     char ifname[32];
@@ -606,12 +611,12 @@ static inline int __mdnsOffload_removeFromPassthroughList(struct wiphy *wiphy,
     char qname[64];
     char *p_qname = NULL;
 
-    AML_WARN("mdnsOffload: removeFromPassthroughList\n");
+    AML_M_WARN(MDNS, "mdnsOffload: removeFromPassthroughList\n");
     memset(ifname, 0, sizeof(ifname));
     memset(qname, 0, sizeof(qname));
     nla_for_each_attr(iter, data, len, rem) {
         type = nla_type(iter);
-        //printk("mdnsOffload: attr type:%d\n", type);
+        //AML_M_INFO(MDNS, "mdnsOffload: attr type:%d\n", type);
         switch (type) {
             case WIFI_MDNS_OFFLOAD_ATTRIBUTE_NETWORK_INTERFACE:
                 strncpy(ifname, (char *)nla_data(iter), sizeof(ifname) - 1);
@@ -622,12 +627,12 @@ static inline int __mdnsOffload_removeFromPassthroughList(struct wiphy *wiphy,
                 p_qname = qname;
                 break;
             default:
-                AML_ERR("mdnsOffload: unknown type:%d\n", type);
+                AML_M_ERR(MDNS, "mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
 
-    AML_WARN("mdnsOffload: removeFromPassthroughList: qname:%s\n", qname);
+    AML_M_WARN(MDNS, "mdnsOffload: removeFromPassthroughList: qname:%s\n", qname);
     if (!p_ifname || !p_qname) {
         err = -EINVAL;
         goto exit;
@@ -635,13 +640,13 @@ static inline int __mdnsOffload_removeFromPassthroughList(struct wiphy *wiphy,
     if (mdns_offload_ops.removeFromPassthroughList) {
         mdns_offload_ops.removeFromPassthroughList(aml_hw, ifname, qname);
     } else {
-        AML_INFO("mdnsOffload: removeFromPassthroughList: unsupported!\n");
+        AML_M_INFO(MDNS, "mdnsOffload: removeFromPassthroughList: unsupported!\n");
         err = -EPERM;
         goto exit;
     }
 exit:
     if (err)
-        AML_ERR("mdnsOffload: removeFromPassthroughList: failed!err:%d\n", err);
+        AML_M_ERR(MDNS, "mdnsOffload: removeFromPassthroughList: failed!err:%d\n", err);
     return err;
 }
 
@@ -649,7 +654,6 @@ static inline int __mdnsOffload_setPassthroughBehavior(struct wiphy *wiphy,
     struct wireless_dev *wdev, const void *data, int len)
 {
     struct aml_hw *aml_hw = wiphy_priv(wiphy);
-    struct aml_vif *vif = netdev_priv(wdev->netdev);
     int rem, type, err = 0;
     const struct nlattr *iter;
     char ifname[32];
@@ -660,7 +664,7 @@ static inline int __mdnsOffload_setPassthroughBehavior(struct wiphy *wiphy,
     memset(ifname, 0, sizeof(ifname));
     nla_for_each_attr(iter, data, len, rem) {
         type = nla_type(iter);
-        //printk("mdnsOffload: attr type:%d\n", type);
+        //AML_M_INFO(MDNS, "mdnsOffload: attr type:%d\n", type);
         switch (type) {
             case WIFI_MDNS_OFFLOAD_ATTRIBUTE_NETWORK_INTERFACE:
                 strncpy(ifname, (char *)nla_data(iter), sizeof(ifname) - 1);
@@ -671,12 +675,12 @@ static inline int __mdnsOffload_setPassthroughBehavior(struct wiphy *wiphy,
                 p_behavior = &behavior;
                 break;
             default:
-                AML_ERR("mdnsOffload: unknown type:%d\n", type);
+                AML_M_ERR(MDNS, "mdnsOffload: unknown type:%d\n", type);
                 break;
         }
     }
-    AML_INFO("mdnsOffload: setPassthroughBehavior: ifname:%s\n", ifname);
-    AML_INFO("mdnsOffload: setPassthroughBehavior: behavior:%d\n", behavior);
+    AML_M_INFO(MDNS, "mdnsOffload: setPassthroughBehavior: ifname:%s\n", ifname);
+    AML_M_INFO(MDNS, "mdnsOffload: setPassthroughBehavior: behavior:%d\n", behavior);
     if (!p_ifname || !p_behavior) {
         err = -EINVAL;
         goto exit;
@@ -685,13 +689,13 @@ static inline int __mdnsOffload_setPassthroughBehavior(struct wiphy *wiphy,
         mdns_offload_ops.setPassthroughBehavior(aml_hw, ifname,
             (passthroughBehavior)behavior);
     } else {
-        AML_INFO("mdnsOffload: setPassthroughBehavior: unsupported!\n");
+        AML_M_INFO(MDNS, "mdnsOffload: setPassthroughBehavior: unsupported!\n");
         err = -EPERM;
         goto exit;
     }
 exit:
     if (err)
-        AML_ERR("mdnsOffload: setPassthroughBehavior: failed!err:%d\n", err);
+        AML_M_ERR(MDNS, "mdnsOffload: setPassthroughBehavior: failed!err:%d\n", err);
     return err;
 }
 

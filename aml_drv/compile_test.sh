@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# SPDX-License-Identifier: GPL-2.0 */
+#
+#Copyright (C) 202X Original Author (retain original author information)
+#Copyright (C) 202X Amlogic, Inc. All rights reserved.
+#
+#Description:
+#
 linux_dir=/net/rwlab-srv1/nx_share/linux
 ARCH=${ARCH:-x86}
 CROSS_COMPILE=${CROSS_COMPILE:-x86_64-poky-linux-}

@@ -391,7 +391,11 @@ struct chan_switch_ind_info
     bool roc;
     uint8_t vif_index;
     bool roc_tdls;
+    uint8_t chan_no;
+    bool scan;
+    uint32_t duration_us;
 };
+
 #endif /* CONFIG_AML_SOFTMAC */
 
 /******************************************************************************

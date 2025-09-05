@@ -19,11 +19,10 @@
 #include <net/cfg80211.h>
 #include <net/ip.h>
 #include <linux/version.h>
-#if LINUX_VERSION_CODE > KERNEL_VERSION(6, 0, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 #include <net/netdev_rx_queue.h>
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
-#include <net/hotdata.h>
 #include <net/rps.h>
 #endif
 #include "aml_rps.h"
@@ -43,7 +42,7 @@ static int aml_rps_map_set(struct netdev_rx_queue *queue, uint32_t cpu_mask)
     static DEFINE_MUTEX(rps_map_mutex);
     char buf[32];
 
-    AML_INFO("set rps_cpus as [%0x]\n", cpu_mask);
+    AML_INFO("%s: set rps_cpus as [%x]\n", netdev_name(queue->dev), cpu_mask);
 
     if (!alloc_cpumask_var(&mask, GFP_KERNEL)) {
         AML_INFO("alloc_cpumask_var fail.\n");
@@ -78,6 +77,7 @@ static int aml_rps_map_set(struct netdev_rx_queue *queue, uint32_t cpu_mask)
 
     mutex_lock(&rps_map_mutex);
     old_map = rcu_dereference_protected(queue->rps_map, mutex_is_locked(&rps_map_mutex));
+    /* coverity[overrun-local] , because of [] */
     rcu_assign_pointer(queue->rps_map, map);
     if (map)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
@@ -184,7 +184,6 @@ static int aml_rps_dev_flow_table_set(struct netdev_rx_queue *queue, unsigned lo
     unsigned long mask;
     struct rps_dev_flow_table *table, *old_table;
     static DEFINE_SPINLOCK(rps_dev_flow_lock);
-    int rc;
 
     if (!capable(CAP_NET_ADMIN))
     {
@@ -211,7 +210,7 @@ static int aml_rps_dev_flow_table_set(struct netdev_rx_queue *queue, unsigned lo
         }
 #else
         if (mask > (ULONG_MAX - RPS_DEV_FLOW_TABLE_SIZE(1)) / sizeof(struct rps_dev_flow)) {
-            AML_INFO("check mask fail %x, max %x\n", mask,
+            AML_INFO("check mask fail %lx, max %lx\n", mask,
                     (ULONG_MAX - RPS_DEV_FLOW_TABLE_SIZE(1)) / sizeof(struct rps_dev_flow));
             /* Enforce a limit to prevent overflow */
             return -EINVAL;
@@ -233,6 +232,7 @@ static int aml_rps_dev_flow_table_set(struct netdev_rx_queue *queue, unsigned lo
     spin_lock(&rps_dev_flow_lock);
     old_table = rcu_dereference_protected(queue->rps_flow_table,
             lockdep_is_held(&rps_dev_flow_lock));
+    /* coverity[overrun-local] , because of [] */
     rcu_assign_pointer(queue->rps_flow_table, table);
     spin_unlock(&rps_dev_flow_lock);
 
@@ -266,26 +266,30 @@ static int aml_rps_sock_flow_sysctl_set(unsigned int size)
     mutex_lock(&sock_flow_mutex);
     orig_sock_table = rcu_dereference_protected(orig_sock_table,
             lockdep_is_held(&sock_flow_mutex));
+    /* coverity[dead_error_line] */
     orig_size = orig_sock_table ? orig_sock_table->mask + 1 : 0;
 
-    if (size > 1 << 29) {
+    if (size > (1 << 29)) {
         /* Enforce limit to prevent overflow */
         mutex_unlock(&sock_flow_mutex);
         AML_INFO("size is large %d\n", size);
         return -EINVAL;
     }
-    size = roundup_pow_of_two(size);
-    if (size != orig_size) {
-        sock_table = vmalloc(RPS_SOCK_FLOW_TABLE_SIZE(size));
+    /* coverity[CONSTANT_EXPRESSION_RESULT] */
+    size = (unsigned int)roundup_pow_of_two(size);
+    if (size != orig_size && size > 0) {
+        sock_table = vmalloc(sizeof(u32) * (size + 1)/*RPS_SOCK_FLOW_TABLE_SIZE(size)*/);
         if (!sock_table) {
             mutex_unlock(&sock_flow_mutex);
             AML_INFO("alloc table fail\n");
             return -ENOMEM;
         }
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
-        net_hotdata.rps_cpu_mask = roundup_pow_of_two(nr_cpu_ids) - 1;
+        /* coverity[CONSTANT_EXPRESSION_RESULT] */
+        net_hotdata.rps_cpu_mask = (unsigned int)roundup_pow_of_two(nr_cpu_ids) - 1;
 #else
-        rps_cpu_mask = roundup_pow_of_two(nr_cpu_ids) - 1;
+        /* coverity[CONSTANT_EXPRESSION_RESULT] */
+        rps_cpu_mask = (unsigned int)roundup_pow_of_two(nr_cpu_ids) - 1;
 #endif
         sock_table->mask = size - 1;
     } else {
@@ -295,8 +299,10 @@ static int aml_rps_sock_flow_sysctl_set(unsigned int size)
     }
 
     for (i = 0; i < size; i++)
+        /* coverity[overrun-local] , because of ents[0] */
         sock_table->ents[i] = RPS_NO_CPU;
 
+    /* coverity[overrun-local] , because of ents[0] */
     rcu_assign_pointer(orig_sock_table, sock_table);
     if (sock_table) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
@@ -332,27 +338,3 @@ int aml_rps_sock_flow_sysctl_enable(void)
 
     return 0;
 }
-
-// template solution for S905L3A
-void aml_rps_switch_check(struct aml_hw *aml_hw, u8 flag)
-{
-    struct aml_vif *aml_vif;
-
-    list_for_each_entry(aml_vif, &aml_hw->vifs, list) {
-        if (!aml_vif->up || aml_vif->ndev == NULL) {
-            continue;
-        }
-        if (AML_VIF_TYPE(aml_vif) == NL80211_IFTYPE_STATION ||
-            AML_VIF_TYPE(aml_vif) == NL80211_IFTYPE_P2P_CLIENT) {
-            printk("%s:%d, flag %d\n", __func__, __LINE__, flag);
-#ifndef CONFIG_LINUXPC_VERSION
-            if (flag == RPS_ON) {
-                aml_rps_cpus_enable(aml_vif->ndev);
-            } else {
-                aml_rps_cpus_disable(aml_vif->ndev);
-            }
-#endif
-        }
-    }
-}
-

@@ -1,5 +1,11 @@
-#include <linux/module.h>
-#include <linux/notifier.h>
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
+#include "aml_bt_notify.h"
 
 static BLOCKING_NOTIFIER_HEAD(bt_event_notifier_list);
 

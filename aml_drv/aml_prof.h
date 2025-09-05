@@ -11,19 +11,24 @@
 #ifndef _AML_PROF_H_
 #define _AML_PROF_H_
 
-#include "reg_access.h"
-#include "aml_platform.h"
+#include "linux/gpio.h"
 
-static inline void aml_prof_set(struct aml_hw *aml_hw, int val)
+#define AML_PROF_CNT(name, counter)         do { } while(0)
+#define AML_PROF_HI(name)                   do { } while(0)
+#define AML_PROF_LO(name)                   do { } while(0)
+#define AML_PROF_START(name, cookie)        do { } while(0)
+#define AML_PROF_FIN(name, cookie)          do { } while(0)
+
+struct aml_hw;
+
+static inline void aml_prof_set(struct aml_hw *aml_hw, int gpio)
 {
-    struct aml_plat *aml_plat = aml_hw->plat;
-    AML_REG_WRITE(val, aml_plat, AML_ADDR_SYSTEM, NXMAC_SW_SET_PROFILING_ADDR);
+    gpio_set_value(gpio, 1);
 }
 
-static inline void aml_prof_clear(struct aml_hw *aml_hw, int val)
+static inline void aml_prof_clear(struct aml_hw *aml_hw, int gpio)
 {
-    struct aml_plat *aml_plat = aml_hw->plat;
-    AML_REG_WRITE(val, aml_plat, AML_ADDR_SYSTEM, NXMAC_SW_CLEAR_PROFILING_ADDR);
+    gpio_set_value(gpio, 0);
 }
 
 #if 0

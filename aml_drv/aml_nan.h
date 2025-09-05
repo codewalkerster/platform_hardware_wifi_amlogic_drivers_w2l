@@ -13,7 +13,19 @@
 #ifndef _AML_NAN_H_
 #define _AML_NAN_H_
 
+/*
+ * INCLUDE FILES
+ ****************************************************************************************
+ */
 #include <linux/types.h>
+
+
+/*
+ * CONSTANTS
+ ****************************************************************************************
+ */
+#define AML_NAN_PUB_PATH "w2l/publish.conf"
+#define AML_NAN_SUB_PATH "w2l/subscribe.conf"
 
 #ifndef MAC2STR
 #define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
@@ -28,6 +40,8 @@
 #define NAN_WIFI_MAX_SVC_NAME_LEN       (32)
 #define NAN_WIFI_MAX_FILTER_LEN         (64)
 #define NAN_WIFI_MAX_SVC_INFO_LEN       (255)
+#define NAN_SUBSCRIBE_MAX_ADDRESS       (8)
+#define HASH_STR_LEN                    (7)
 
 /*Max publish + subscribe numbers 4*/
 #define NAN_MAX_PUBLISH_NUM 2
@@ -44,8 +58,13 @@
 #define NAN_SDA_SERVICE_CONTROL_TYPE_SUBSCRIBE BIT(0)
 #define NAN_SDA_SERVICE_CONTROL_TYPE_FOLLOWUP BIT(1)
 
+/*
+ * TYPE and STRUCT DEFINITIONS
+ ****************************************************************************************
+ */
+
 /**
-  * @brief NAN Discovery start configuration
+  * @brief NAN Discovery enable configuration
   *
   */
 typedef struct  {
@@ -56,6 +75,55 @@ typedef struct  {
     uint8_t scan_time;     /* Scan time in seconds while searching for a NAN cluster */
     uint16_t warm_up_sec;  /* Warm up time before assuming NAN Anchor Master role */
 } wifi_nan_cfg;
+
+typedef struct {
+    uint8_t match_filter_len;
+    uint8_t match_filter[NAN_WIFI_MAX_FILTER_LEN];
+} match_filter;
+
+typedef struct {
+    uint8_t publish_id;
+    uint8_t publish_type;
+    uint8_t inst_id;                                /**< Own service instance id */
+    uint8_t peer_inst_id;                           /**< Peer's service instance id */
+    uint8_t peer_mac[6];
+    uint8_t service_name[NAN_WIFI_MAX_SVC_NAME_LEN];
+    uint8_t service_name_hash[NAN_SERVICE_HASH_LENGTH];
+    uint8_t service_specific_info[NAN_WIFI_MAX_SVC_INFO_LEN];
+    match_filter match_filter_tx;
+    match_filter match_filter_rx;
+} publish_config;
+
+/* NAN Service Response Filter Attribute Bit */
+enum nan_srf_type {
+    NAN_SRF_ATTR_PARTIAL_MAC_ADDR = 0,
+    NAN_SRF_ATTR_BLOOM_FILTER,
+};
+
+typedef struct {
+    enum nan_srf_type srf_type;
+    bool    srf_include;
+    uint8_t srf_bf_len;
+    uint8_t srf_bf_idx;
+    uint8_t srf_bf[32];
+    uint8_t srf_num_macs;
+    uint8_t srf_mac_addresses[NAN_SUBSCRIBE_MAX_ADDRESS][MAC_ADDR_LEN];
+} srf_info;
+
+typedef struct {
+    uint8_t subscribe_id;
+    uint8_t subscribe_type;
+    uint8_t service_name[NAN_WIFI_MAX_SVC_NAME_LEN];
+    uint8_t service_specific_info[NAN_WIFI_MAX_SVC_INFO_LEN];
+    match_filter match_filter_tx;
+    match_filter match_filter_rx;
+    srf_info srf;
+} subscribe_config;
+
+typedef struct {
+    publish_config publish;
+    subscribe_config subscribe;
+} svc_config;
 
 /**
   * @brief NAN Services types
@@ -81,10 +149,10 @@ typedef struct {
     uint8_t service_name[NAN_WIFI_MAX_SVC_NAME_LEN];   /* Service name identifier */
     uint8_t svc_info_len;
     uint8_t svc_info[NAN_WIFI_MAX_SVC_INFO_LEN];       /* Service info shared in Subscribe frame */
-    uint16_t match_filter_len;
-    uint8_t matching_filter[NAN_WIFI_MAX_FILTER_LEN];  /* Comma separated filters for filtering services */
+    match_filter mf;
     uint8_t service_name_hash[NAN_SERVICE_HASH_LENGTH];
     uint8_t peer_mac[6];
+    bool cancel;
 } wifi_nan_publish_cfg;
 
 /**
@@ -98,9 +166,10 @@ typedef struct {
     uint8_t service_name[NAN_WIFI_MAX_SVC_NAME_LEN];   /* Service name identifier */
     uint8_t svc_info_len;
     uint8_t svc_info[NAN_WIFI_MAX_SVC_INFO_LEN];       /* Service info shared in Subscribe frame */
-    uint16_t match_filter_len;
-    uint8_t matching_filter[NAN_WIFI_MAX_FILTER_LEN];  /* Comma separated filters for filtering services */
+    match_filter mf;
     uint8_t service_name_hash[NAN_SERVICE_HASH_LENGTH];
+    srf_info srf;
+    bool cancel;
 } wifi_nan_subscribe_cfg;
 
 /**
@@ -125,7 +194,7 @@ typedef struct {
 } nan_peer_record;
 
 struct peer_svc_info_list {
-    struct list_head next;
+    struct list_head list;
     uint8_t peer_svc_info[NAN_WIFI_MAX_SVC_INFO_LEN];   /**< Information for followup message */
     uint8_t svc_id;                                     /**< Identifier of peer's service */
     uint8_t own_svc_id;                                 /**< Identifier for own service  */
@@ -140,19 +209,25 @@ struct peer_svc_info {
     uint8_t type;                                       /**< Service type (Publish/Subscribe) */
     uint8_t peer_nmi[6];                                /**< Peer's NAN Management Interface address */
     uint8_t service_name_hash[NAN_SERVICE_HASH_LENGTH];
+    match_filter mf;
+    srf_info srf;
 };
 
 struct own_svc_info {
     struct list_head peer_list;                         /**< List of peers matched for specific service */
-    uint8_t svc_name[NAN_WIFI_MAX_SVC_NAME_LEN];           /**< Name identifying a service */
+    uint8_t svc_name[NAN_WIFI_MAX_SVC_NAME_LEN];        /**< Name identifying a service */
     uint8_t svc_id;                                     /**< Identifier for a service */
     uint8_t type;                                       /**< Service type (Publish/Subscribe) */
     uint8_t num_peer_records;                           /**< Count of peer records associated with svc_id */
+    match_filter mf_tx;
+    match_filter mf_rx;
 };
 
 typedef struct {
     uint8_t state;
+    uint8_t instance_id;
     uint8_t nan_svc_num;
+    spinlock_t peer_list_lock;
     struct own_svc_info own_svc[NAN_WIFI_NAN_MAX_SVC_SUPPORTED]; /**< Record of own service(s) */
 } nan_ctx_t;
 
@@ -163,77 +238,77 @@ struct nan_enable_cfm
     uint8_t status;
     /// Index of the VIF for which the AP is started
     uint8_t vif_idx;
-    /// Index of the channel context attached to the VIF
-    uint8_t ch_idx;
-    /// Index of the STA used for BC/MC traffic
-    uint8_t bcmc_idx;
 };
+
+/*
+ * FUNCTION PROTOTYPES
+ ****************************************************************************************
+ */
 
 /**
   * @brief      Start NAN Discovery with provided configuration
   *
   * @attention  This API should be called after aml_cfg80211_init().
   *
-  * @param      nan_cfg  NAN related parameters to be configured.
+  * @param      nan_conf  NAN related parameters to be configured.
   *
   * @return
-  *    - ESP_OK: succeed
-  *    - others: failed
+  *    - non-zero: failed
+  *    - zero: succeed
   */
-uint32_t aml_wifi_nan_start(const wifi_nan_cfg *nan_cfg);
+int aml_nan_enable(struct aml_hw *aml_hw, wifi_nan_cfg *nan_conf);
 
 /**
-  * @brief      Stop NAN Discovery, end NAN Services and Datapaths
+  * @brief      Stop NAN Discovery, end NAN Services
   *
   * @return
-  *    - ESP_OK: succeed
-  *    - others: failed
+  *    - non-zero: failed
+  *    - zero: succeed
   */
-uint32_t aml_wifi_nan_stop(void);
+int aml_nan_disable(struct aml_hw *aml_hw);
 
 /**
   * @brief      Start Publishing a service to the NAN Peers in vicinity
   *
-  * @attention  This API should be called after aml_wifi_nan_start().
+  * @attention  This API should be called after aml_nan_enable().
   *
-  * @param      publish_cfg  Configuration parameters for publishing a service.
+  * @param      pub_cfg  Configuration parameters for publishing a service.
+  *             service_id Service identifier
+  *             cancel   Is cancel service
   *
   * @return
-  *    - non-zero: Publish service identifier
-  *    - zero: failed
+  *    - Greater than zero: Publish service identifier
+  *    - Less than or equal to zero: failed
   */
-uint32_t aml_nan_publish_req(wifi_nan_publish_cfg *publish_conf);
-uint32_t aml_nan_subscribe_req(wifi_nan_subscribe_cfg *subscribe_conf);
-uint32_t aml_nan_followup_send(wifi_nan_followup_cfg *fup_params);
-int hwaddr_aton2(const char *txt, uint8_t *addr);
-
-uint32_t aml_wifi_nan_publish_service(const wifi_nan_publish_cfg *publish_cfg);
+int aml_nan_publish_service(struct aml_hw *aml_hw, publish_config *pub_cfg, uint8_t service_id, bool cancel);
 
 /**
   * @brief      Subscribe for a service within the NAN cluster
   *
   * @attention  This API should be called after aml_wifi_nan_start().
   *
-  * @param      subscribe_cfg  Configuration parameters for subscribing for a service.
+  * @param      sub_cfg  Configuration parameters for subscribing for a service.
+  *             service_id Service identifier
+  *             cancel   Is cancel service
   *
   * @return
-  *    - non-zero: Subscribe service identifier
-  *    - zero: failed
+  *    - Greater than zero: Subscribe service identifier
+  *    - Less than or equal to zero: failed
   */
-uint32_t aml_wifi_nan_subscribe_service(const wifi_nan_subscribe_cfg *subscribe_cfg);
+int aml_nan_subscribe_service(struct aml_hw *aml_hw, subscribe_config *sub_cfg,  uint8_t service_id, bool cancel);
 
 /**
   * @brief      Send a follow-up message to the NAN Peer with matched service
   *
   * @attention  This API should be called after a NAN service is discovered due to a match.
   *
-  * @param      fup_params  Configuration parameters for sending a Follow-up message.
+  * @param      followup_conf Configuration parameters for sending a Follow-up message.
   *
   * @return
   *    - AML_OK: succeed
   *    - others: failed
   */
-uint32_t aml_wifi_nan_send_message(wifi_nan_followup_cfg *fup_params);
+int aml_nan_send_message(struct aml_hw *aml_hw, wifi_nan_followup_cfg *followup_conf);
 
 /**
   * @brief      Cancel a NAN service
@@ -244,48 +319,94 @@ uint32_t aml_wifi_nan_send_message(wifi_nan_followup_cfg *fup_params);
   *    - AML_OK: succeed
   *    - others: failed
   */
-uint32_t aml_wifi_nan_cancel_service(uint8_t service_id);
-
+int aml_nan_cancel_service(struct aml_hw *aml_hw, uint8_t service_id);
 
 /**
- * brief         Get own Service information from Service ID OR Name.
+ * brief         Get own Service information from Service ID
  *
- * @attention    If service information is to be fetched from service name, set own_svc_id as zero.
+ * @param        svc_id It indicates Service ID to search for.
+ * @return
+ *   - !NULL: succeed
+ *   - NULL: failed
+ */
+struct own_svc_info *aml_nan_find_own_svc(uint8_t svc_id);
+
+/**
+ * brief         Find Peer's Service information using Peer MAC and Service ID.
  *
- * @param[inout] own_svc_id As input, it indicates Service ID to search for.
- *                          As output, it indicates Service ID of the service found using Service Name.
- * @param[inout] svc_name   As input, it indicates Service Name to search for.
- *                          As output, it indicates Service Name of the service found using Service ID.
- * @param[out]   num_peer_records  Number of peers discovered by corresponding service.
+ * @param        own_svc_id   Owner service ID of the published/subscribed service.
+ * @param        peer_svc_id  Peer service ID of the published/subscribed service.
+ * @param        peer_nmi     Peer's NAN Management Interface MAC address.
+ * @return
+ *   - !NULL: succeed
+ *   - NULL: failed
+ */
+struct peer_svc_info_list *aml_nan_find_peer_svc(uint8_t own_svc_id, uint8_t peer_svc_id, uint8_t peer_nmi[]);
+
+/**
+ * brief         Record Peer's Service information.
+ *
+ * @param        own_svc_id   Owner service ID of the published/subscribed service.
+ * @param        peer_svc_id  Peer service ID of the published/subscribed service.
+ * @param        peer_nmi     Peer's NAN Management Interface MAC address.
  * @return
  *   - AML_OK: succeed
  *   - AML_FAIL: failed
  */
-uint32_t aml_wifi_nan_get_own_svc_info(uint8_t *own_svc_id, char *svc_name, int *num_peer_records);
+bool aml_nan_record_peer_svc(uint8_t own_svc_id, uint8_t peer_svc_id, uint8_t peer_nmi[]);
 
 /**
- * brief         Get a list of Peers discovered by the given Service.
+ * brief         Convert ASCII string to MAC address
  *
- * @param[inout] num_peer_records As input param, it stores max peers peer_record can hold.
- *               As output param, it specifies the actual number of peers this API returns.
- * @param        own_svc_id  Service ID of own service.
- * @param[out]   peer_record Pointer to first peer record.
+ * @param        txt MAC address as a string(e.g., 00:11:22:33:44:55 or 0011.2233.4455)
+ * @param        addr Buffer for the MAC address (ETH_ALEN = 6 bytes).
  * @return
- *   - AML_OK: succeed
- *   - AML_FAIL: failed
+ *   - Characters used (> 0): success
+ *   - -1: failure
  */
-uint32_t aml_wifi_nan_get_peer_records(int *num_peer_records, uint8_t own_svc_id, nan_peer_record *peer_record);
+int hwaddr_aton2(const char *txt, uint8_t *addr);
 
 /**
- * brief         Find Peer's Service information using Peer MAC and optionally Service Name.
+ * brief          Get nan unsolcoted publish config
  *
- * @param       svc_name    Service Name of the published/subscribed service.
- * @param       peer_mac    Peer's NAN Management Interface MAC address.
- * @param[out]  peer_info   Peer's service information structure.
+ * @param[out]    publish_req publish request config
+ * @param[in]     pub_cfg publish config
  * @return
- *   - AML_OK: succeed
- *   - AML_FAIL: failed
+ *    - non-zero: succeed
+ *    - zero: failed
  */
-uint32_t aml_wifi_nan_get_peer_info(char *svc_name, uint8_t *peer_mac, nan_peer_record *peer_info);
+uint8_t aml_nan_get_unsolcoted_pub_cfg(struct aml_hw *aml_hw, wifi_nan_publish_cfg *publish_req, publish_config* pub_cfg);
+
+/**
+ * brief          Get nan solcoted publish config
+ *
+ * @param[out]    publish_req publish request config
+ * @param[in]     pub_cfg publish config
+ * @return
+ *    - non-zero: succeed
+ *    - zero: failed
+ */
+uint8_t aml_nan_get_solcoted_pub_cfg(wifi_nan_publish_cfg *publish_req, publish_config* pub_cfg);
+
+/**
+ * brief          Get nan subscribe config
+ *
+ * @param[out]    subscribe_req subscribe request config
+ * @param[in]     sub_cfg subscribe config
+ * @return
+ *    - non-zero: succeed
+ *    - zero: failed
+ */
+uint8_t aml_nan_get_sub_cfg(struct aml_hw *aml_hw, wifi_nan_subscribe_cfg *subscribe_req, subscribe_config *sub_cfg);
+
+/**
+ * brief          Get nan follow up config
+ *
+ * @param[out]    fup_params follow up params
+ * @return
+ *    - Greater than zero: succeed
+ *    - Less than or equal to zero: failed
+ */
+int32_t aml_nan_get_followup_cfg(wifi_nan_followup_cfg *fup_params);
 
 #endif

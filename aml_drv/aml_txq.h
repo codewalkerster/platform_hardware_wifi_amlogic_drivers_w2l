@@ -205,7 +205,7 @@ enum aml_push_flags {
  * @AML_TXQ_IN_HWQ_LIST: The queue is scheduled for transmission
  * @AML_TXQ_STOP_FULL: No more credits for the queue
  * @AML_TXQ_STOP_CSA: CSA is in progress
- * @AML_TXQ_STOP_STA_PS: Destination sta is currently in power save mode
+ * @AML_TXQ_STOP_STA_PS: destination sta is currently in power save mode
  * @AML_TXQ_STOP_VIF_PS: Vif owning this queue is currently in power save mode
  * @AML_TXQ_STOP_CHAN: Channel of this queue is not the current active channel
  * @AML_TXQ_STOP_MU_POS: TXQ is stopped waiting for all the buffers pushed to
@@ -224,9 +224,10 @@ enum aml_txq_flags {
     AML_TXQ_STOP_MU_POS  = BIT(6),
     AML_TXQ_NDEV_FLOW_CTRL = BIT(7),
     AML_TXQ_STOP_COEX_INACTIVE = BIT(8),
+    AML_TXQ_STOP_SUSPEND   = BIT(9),
     AML_TXQ_STOP         = (AML_TXQ_STOP_FULL | AML_TXQ_STOP_CSA |
                              AML_TXQ_STOP_STA_PS | AML_TXQ_STOP_VIF_PS |
-                             AML_TXQ_STOP_CHAN | AML_TXQ_STOP_COEX_INACTIVE) ,
+                             AML_TXQ_STOP_CHAN | AML_TXQ_STOP_COEX_INACTIVE | AML_TXQ_STOP_SUSPEND),
 };
 
 
@@ -390,8 +391,8 @@ static inline bool aml_txq_is_ready_for_push(struct aml_txq *txq)
          tid++, txq++)
 
 #define foreach_sta_txq_safe(sta, txq, tid, aml_hw)                          \
-    for (tid = 0, txq = aml_txq_sta_get(sta, 0, aml_hw);               \
-         txq && (tid < (is_multicast_sta(sta->sta_idx) ? 1 : NX_NB_TXQ_PER_STA)); \
+    for (tid = 0, sta && (txq = aml_txq_sta_get(sta, 0, aml_hw));               \
+         sta && txq && (tid < (is_multicast_sta(sta->sta_idx) ? 1 : NX_NB_TXQ_PER_STA)); \
          tid++, txq++)
 #endif
 
@@ -419,9 +420,9 @@ static inline bool aml_txq_is_ready_for_push(struct aml_txq *txq)
          i++, tid = nx_tid_prio[i % NX_NB_TXQ_PER_STA], txq = aml_txq_sta_get(sta, tid, aml_hw))
 
 #define foreach_sta_txq_prio_safe(sta, txq, tid, i, aml_hw)                          \
-    for (i = 0, tid = nx_tid_prio[0], txq = aml_txq_sta_get(sta, tid, aml_hw); \
+    for (i = 0, tid = nx_tid_prio[0], sta && (txq = aml_txq_sta_get(sta, tid, aml_hw)); \
          txq && i < NX_NB_TXQ_PER_STA;                                                  \
-         i++, tid = nx_tid_prio[i % NX_NB_TXQ_PER_STA], txq = aml_txq_sta_get(sta, tid, aml_hw))
+         i++, tid = nx_tid_prio[i % NX_NB_TXQ_PER_STA], sta && (txq = aml_txq_sta_get(sta, tid, aml_hw)))
 #endif
 
 /**
@@ -524,5 +525,6 @@ void aml_hwq_process(struct aml_hw *aml_hw, struct aml_hwq *hwq);
 void aml_hwq_process_all(struct aml_hw *aml_hw);
 int aml_txq_is_empty(struct aml_vif *aml_vif, struct aml_sta * aml_sta);
 int aml_unktxq_is_empty(struct aml_vif *aml_vif);
+int aml_bcmctxq_is_empty(struct aml_vif *aml_vif);
 
 #endif /* _AML_TXQ_H_ */

@@ -1,3 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
 #ifndef _AML_P2P_H_
 #define _AML_P2P_H_
 
@@ -14,6 +21,9 @@
 #define P2P_NEG_RSP_DROP_TIME       10
 #define WFD_IE_OUI_TYPE             0x0a
 #define DIRECT_SSID_LEN             7
+#define WFD_MAX_RTSP_LEN            300
+#define WFD_RTSP_CHECK_LEN          40 //first 40 bytes check rtsp string RTSP/1.0
+#define WFD_TRACE_INFO_LEN          30
 
 enum p2p_attr_id
 {
@@ -62,14 +72,14 @@ enum p2p_neg_state {
     P2P_NEG_SEND_NEG_CFM,
 };
 
-extern char p2p_pub_action_trace[][30];
-extern char p2p_action_trace[][30];
-extern u32 aml_get_p2p_ie_offset(const u8 *buf, u32 frame_len, u8 element_offset);
-extern u32 aml_get_wfd_ie_offset(const u8 *buf, u32 frame_len, u8 element_offset);
-extern void aml_change_p2p_chanlist(struct aml_vif *vif, u8 *buf, u32 frame_len,u32* frame_len_offset,struct cfg80211_chan_def chan_def);
-extern void aml_change_p2p_intent(struct aml_vif *vif, u8 *buf, u32 frame_len,u32* frame_len_offset);
-extern void aml_change_p2p_operchan(struct aml_vif *vif, u8 *buf, u32 frame_len, struct cfg80211_chan_def chan_def);
-
+const char *p2p_pub_action_trace_name(int type);
+const char *p2p_action_trace_name(int type);
+u32 aml_get_p2p_ie_offset(const u8 *buf, u32 frame_len, u8 element_offset);
+u32 aml_get_wfd_ie_offset(const u8 *buf, u32 frame_len, u8 element_offset);
+void aml_change_p2p_chanlist(struct aml_vif *vif, u8 *buf, u32 frame_len,u32 *frame_len_offset,struct cfg80211_chan_def chan_def);
+void aml_change_p2p_intent(struct aml_vif *vif, u8 *buf, u32 frame_len, u32 *frame_len_offset);
+void aml_change_p2p_operchan(struct aml_vif *vif, u8 *buf, u32 frame_len, struct cfg80211_chan_def chan_def);
 void aml_rx_parse_p2p_chan_list(u8 *buf, u32 frame_len);
+extern bool aml_filter_rtsp_frame(const struct aml_vif *vif, u32 len, const u8 *data, AML_SP_STATUS_E sp_status);
 
 #endif /* _AML_P2P_H_ */

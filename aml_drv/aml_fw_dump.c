@@ -467,8 +467,6 @@ DEBUGFS_READ_WRITE_FILE_OPS(um_helper);
 #ifdef CONFIG_AML_DEBUGFS
 int aml_um_helper(struct aml_debugfs *aml_debugfs, const char *cmd)
 {
-    struct aml_hw *aml_hw = container_of(aml_debugfs, struct aml_hw,
-                                           debugfs);
     char *envp[] = { "PATH=/sbin:/usr/sbin:/bin:/usr/bin", NULL };
     char **argv;
     int argc = 0, ret = 0;
@@ -482,7 +480,7 @@ int aml_um_helper(struct aml_debugfs *aml_debugfs, const char *cmd)
 
     if ((ret = CALL_USERMODEHELPER(argv[0], argv, envp,
                                    UMH_WAIT_PROC | UMH_KILLABLE)))
-        dev_err(aml_hw->dev, "Failed to call %s (%s returned 0x%x)\n",
+        AML_ERR("Failed to call %s (%s returned 0x%x)\n",
                 argv[0], cmd, ret);
     argv_free(argv);
 
@@ -503,18 +501,16 @@ static void aml_um_helper_work(struct work_struct *ws)
 
 int aml_trigger_um_helper(struct aml_debugfs *aml_debugfs)
 {
-    struct aml_hw *aml_hw = container_of(aml_debugfs, struct aml_hw,
-                                           debugfs);
-
+    spin_lock_bh(&aml_debugfs->umh_lock);
     if (aml_debugfs->helper_scheduled == true) {
-        dev_err(aml_hw->dev, "%s: Already scheduled\n", __func__);
+        spin_unlock_bh(&aml_debugfs->umh_lock);
+        AML_ERR("Already scheduled\n");
         return -EBUSY;
     }
 
-    spin_lock_bh(&aml_debugfs->umh_lock);
     if (aml_debugfs->unregistering) {
         spin_unlock_bh(&aml_debugfs->umh_lock);
-        dev_err(aml_hw->dev, "%s: unregistering\n", __func__);
+        AML_ERR("unregistering\n");
         return -ENOENT;
     }
     aml_debugfs->helper_scheduled = true;
@@ -544,6 +540,7 @@ int aml_dbgfs_register_fw_dump(struct aml_hw *aml_hw,
     DEBUGFS_ADD_FILE(um_helper, dir_drv, S_IWUSR | S_IRUSR);
 
     aml_debugfs->trace_prst = aml_debugfs->helper_scheduled = false;
+    /* coverity[side_effect_free] - ignore */
     spin_lock_init(&aml_debugfs->umh_lock);
     DEBUGFS_ADD_FILE(rhd,       dir_diags, S_IRUSR);
     DEBUGFS_ADD_FILE(rbd,       dir_diags, S_IRUSR);

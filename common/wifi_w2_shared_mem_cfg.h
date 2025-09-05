@@ -1,3 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
 #ifndef __WIFI_W2_SHARED_MEM_CFG_H__
 #define __WIFI_W2_SHARED_MEM_CFG_H__
 
@@ -9,12 +16,17 @@
 #define TXLBUF_TAG_SDIO                  (0x6000fe90) /* size 0x3a00 */
 
 #define HW_RXBUF2_START_ADDR             (0x60013890) /* size 0x2BC */
-#define HW_RXBUF1_START_ADDR             (0x60013b4c)
+#if defined (APF)
+#define BUF_FOR_SUSPEND_USE_ADDR         (0x60013b4c)
+#endif
+#define HW_RXBUF1_START_ADDR             (0x6001534C) /* 0x60013b4c + 6K(for apf)*/
+
 /*
 LA OFF: rx buffer large size 0x40000, small size: 0x10000;
 LA ON: rx buffer large size 0x30000, small size: 0x20000
 */
-#define RXBUF_START_ADDR                 (0x60013b4c)
+#define RXBUF_START_ADDR                 (0x6001534C) /* 0x60013b4c + 6K(for apf)*/
+
 #define RXBUF_END_ADDR_SMALL             (0x6001e000) /*rx buf size: (0xA4B4)*/
 #define RXBUF_END_ADDR_LARGE             (0x6006bb4c) /*rx buf size: (352K)*/
 #define RXBUF_END_ADDR_LA_LARGE          (0x6005b400) //rx small + 160 tx page
@@ -41,6 +53,7 @@ LA ON: rx buffer large size 0x30000, small size: 0x20000
 
 #define TRX_BUF_SIZE        (0x60080000 - RXBUF_START_ADDR)
 
+#define DCCM_TRACE_MID_ADDR         (0X828BF0)
 #define DCCM_TRACE_START_ADDR       (0x828BF4)
 #define HOST_DCCM_TRACE_SAME_ADDR   (0xd28BF8)
 #define DCCM_TRACE_SAME_ADDR        (0x828BF8)
@@ -59,14 +72,11 @@ LA ON: rx buffer large size 0x30000, small size: 0x20000
 #define LA_START_ADDR       (0x60070000)
 #define LA_LENGTH           (0x10000)
 
-#define SUSPEND_FW_TYPE_SIGN (0x6fffc)
-#define SUSPEND_FW_LOCK_SIGN (0x6fff8)
-#define SUSPEND_FW_TYPE (0xfefefefe)
-#define RF_FW_TYPE (0xefefefef)
-#define SUSPEND_FW_LOCK (0xeeffeeff)
-#define SUSPEND_FW_UNLOCK (0xffeeffee)
-
 #define SDIO_USB_EXTEND_E2A_IRQ_STATUS CMD_DOWN_FIFO_FDN_ADDR
+
+#define USB_2T_MODE             (1)
+#define USB_2T_MODE_REG         (0x141784)
+#define HOST_USB_2T_MODE_REG    (MAC_ICCM_AHB_BASE + ICCM_ROM_LEN + 0x1784)
 
 /* SDIO USB E2A EXTEND IRQ TYPE */
 enum sdio_usb_e2a_irq_type {
@@ -77,11 +87,16 @@ enum sdio_usb_e2a_irq_type {
     DYNAMIC_BUF_TRACE_EXPEND_FINISH,
     DYNAMIC_BUF_TRACE_REDUCE_FINISH,
     DBG_REPORT_IRQ,
+    DBG_DUMP_MEM_IRQ,
+    SDIO_DETECT_IRQ,
+    SDIO_FW_RST_IRQ,
 };
 
 struct sdio_buffer_control
 {
     unsigned char flag;
+    unsigned char need_update_edca;
+    unsigned char rx_idle_chk_en;
     unsigned int tx_start_time;
     unsigned int tx_total_len;
     unsigned int rx_start_time;
@@ -120,14 +135,16 @@ extern struct usb_trace_control usb_trace_ctrl;
 #define BUFFER_LA_FREE             BIT(13)
 #define BUFFER_TRACE_USED          BIT(14)
 #define BUFFER_TRACE_FREE          BIT(15)
+#define DYNAMIC_BUF_IS_ON_TX  ((sdio_buffer_ctrl.buffer_status) & (BUFFER_TX_USED))
+#define DYNAMIC_BUF_IS_ON_RX  ((sdio_buffer_ctrl.buffer_status) & (BUFFER_RX_USED))
 
-//SDIO_FI2HOST_IRQ_CFG bif flag for firmware to host
+//RG_WIFI_IF_FW2HST_IRQ_CFG buffer flag for firmware to host
 #define RX_WRAP_TEMP_FLAG             BIT(19)
 #define FW_BUFFER_NARROW              BIT(20)
 #define FW_BUFFER_EXPAND              BIT(21)
 #define FW_BUFFER_ERROR               BIT(22)
 
-//CMD_DOWN_FIFO_FDH_ADDR + 4 bif flag for host to firmware
+//CMD_DOWN_FIFO_FDH_ADDR + 4 buffer flag for host to firmware
 #define RX_ENLARGE_READ_RX_DATA_FINISH BIT(25)
 #define HOST_RXBUF_ENLARGE_FINISH      BIT(26)
 #define RX_REDUCE_READ_RX_DATA_FINISH  BIT(27)
@@ -137,7 +154,7 @@ extern struct usb_trace_control usb_trace_ctrl;
 #define FW_BUFFER_STATUS              (FW_BUFFER_NARROW | FW_BUFFER_EXPAND | FW_BUFFER_ERROR)
 #define FW_BUFFER_ERROR_PATTERN       (0xC0DEDEAD)
 
-#define RX_HAS_DATA                    BIT(0)
+#define RX_HAS_DATA        BIT(0)
 
 // For debug exception and assert_err
 #define DBG_INFO_LEN                   (1024)
@@ -180,5 +197,37 @@ struct assert_info
 #define SDIO_IRQ_E2A_CHAN_SWITCH_IND_MSG           CO_BIT(15)
 
 #define UNWRAP_SIZE (56)
+
+//some common define
+#define SUSPEND_FW_TYPE_SIGN (0x6f7fc)
+#define SUSPEND_FW_LOCK_SIGN (0x6f7f8)
+#define SUSPEND_FW_TYPE (0xfefefefe)
+#define RF_FW_TYPE (0xefefefef)
+#define SUSPEND_FW_LOCK (0xeeffeeff)
+#define SUSPEND_FW_UNLOCK (0xffeeffee)
+
+#if 0
+#define WIFI_SUSPEND_CODE_ADDR (0x060070000)
+#define WIFI_SUSPEND_CODE_LEN (21668)
+#else
+#define WIFI_SUSPEND_CODE_ADDR (0x000065000)
+#define WIFI_SUSPEND_CODE_LEN (43008)
+#define WIFI_CMD_CODE_LEN (2048)
+#endif
+
+#define HOST_CMD_COUNT 21
+#define HOST_CMD_SIZE_LONG (2048)
+#define HOST_CMD_SIZE (1024)
+#define HOST_CMD_CODE_ADDR (0x0006f800)
+#define CMD_FW_LOCK_SIGN (0x6fffc)
+#define CMD_FW_LOCK (0xeeffeeff)
+#define CMD_FW_UNLOCK (0xffeeffee)
+
+enum host_cmd_download_tag {
+    MM_SUB_SET_SUSPEND_REQ_INDEX,
+    MM_SUB_SCANU_CANCEL_REQ_INDEX,
+    MM_SUB_CALIBRATION_INDEX,
+    MM_SUB_SHOW_TX_MSG_INDEX,
+};
 
 #endif

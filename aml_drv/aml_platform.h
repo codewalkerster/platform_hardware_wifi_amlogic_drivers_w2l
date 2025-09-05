@@ -162,6 +162,9 @@ enum aml_platform_addr {
     AML_ADDR_SYSTEM,
     AML_ADDR_MAX,
 };
+
+#define AML_BASE_ADDR  0x60000000   /* base address of AML_ADDR_SYSTEM */
+
 extern unsigned int aml_bus_type;
 extern char * aml_wifi_get_bus_type(void);
 extern u32 aml_pci_readl(u8* addr);
@@ -178,7 +181,7 @@ struct aml_hw;
  * @enable: Configure communication with the fw (i.e. configure the transfers
  *         enable and register interrupt)
  * @disable: Stop communication with the fw
- * @deinit: Free all ressources allocated for the embedded platform
+ * @deinit: Free all resources allocated for the embedded platform
  * @get_address: Return the virtual address to access the requested address on
  *              the platform.
  * @ack_irq: Acknowledge the irq at link level.
@@ -188,7 +191,6 @@ struct aml_hw;
  * @priv Private data for the link driver
  */
 struct aml_plat {
-    //struct usb_device *usb_dev;
     struct auc_hif_ops *hif_ops;
 
     struct device *dev;
@@ -370,8 +372,6 @@ void aml_get_vid(struct aml_plat *aml_plat);
 int aml_platform_reset(struct aml_plat *aml_plat);
 int aml_plat_lmac_load(struct aml_plat *aml_plat);
 void aml_plat_mpif_sel(struct aml_plat *aml_plat);
-int aml_sdio_create_thread(struct aml_hw *aml_hw);
-void aml_sdio_destroy_thread(struct aml_hw *aml_hw);
 int aml_cpufreq_boost_remove(struct aml_hw *aml_hw);
 int aml_cpufreq_boost_update(struct aml_hw *aml_hw);
 

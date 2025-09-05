@@ -28,6 +28,8 @@
 
  /* txcfm start address in sram  */
 #define SRAM_TXCFM_START_ADDR       (0xa17000)
+/*rf save data start address in sram,  size 2260bytes*/
+#define SRAM_RF_DATA_ADDR           (0xa17600)
  /* flag start base address for store some flag info in sram */
 #define SRAM_FLAG_MEM_BASE          (0xa17fc0)
 #define CHAN_SWITCH_IND_MSG_ADDR    (0xa17fe4)
@@ -55,7 +57,6 @@
 #define   REG_OF_SYNC_TWO_RSSI    (MAC_SRAM_BASE + 0x1c)
 #define   REG_OF_SYNC_RSSI        (MAC_SRAM_BASE + 0x20)
 #define   REG_OF_SYNC_SNR         (MAC_SRAM_BASE + 0x24)
-#define   REG_OF_SYNC_P2P_RSSI    (MAC_SRAM_BASE + 0x28)
 #define   SRAM_DATA_BUF           (MAC_SRAM_BASE + 0x100)//for host trasfer err after suspend fail
 
 /*wifi operate mode */
@@ -314,8 +315,8 @@ typedef struct HW_TxBufferInfo
 
 enum
 {
-        SMOOHING_NOT_REC = 0,
-        SMOOHING_REC =1
+        SMOOTHING_NOT_REC = 0,
+        SMOOTHING_REC =1
 };
 enum
 {
@@ -389,7 +390,7 @@ typedef struct hw_tx_vector_bits
                      tv_fw_duration_valid:1,
                      tv_rty_flag:1,
                      /*ip/tcp/udp checksum hw calculate enable, hw will check if ip/tcp/udp */
-                     tv_txcsum_enbale:1,
+                     tv_txcsum_enable:1,
                      /*the final encrypted function is decided by tv_encrypted_disable and "encrypt type" */
                      tv_encrypted_disable:1,
                      /*not use, must be 0 */
@@ -533,7 +534,7 @@ typedef struct hw_tx_vector_bits
            CSI_MATRICES indicates that EXPANSION_MAT is a set of channel
            state matrices.
          */
-        unsigned int tv_usr_postion: 2,
+        unsigned int tv_usr_position: 2,
                      tv_group_id:6,
                      tv_partial_id:9,
                      tv_num_users:2,

@@ -1,4 +1,10 @@
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
 #define AML_MODULE  IWPRIV
 
 #include <linux/sort.h>
@@ -14,6 +20,7 @@
 #include "aml_log.h"
 #include "aml_fw_trace.h"
 #include "aml_utils.h"
+#include "aml_rate.h"
 #include "aml_compat.h"
 #include "aml_recy.h"
 #ifdef SDIO_SPEED_DEBUG
@@ -21,11 +28,14 @@
 #endif
 #include "sdio_common.h"
 #include "aml_fw_trace.h"
-#include "aml_cfg.h"
 #ifdef CONFIG_AML_NAN_SUPPORT
 #include "aml_nan.h"
 #endif
 #include "aml_csi.h"
+#include "aml_cfg.h"
+#include <linux/wireless.h>
+#include "aml_regdom.h"
+#include "aml_msg_tx.h"
 
 #define RC_AUTO_RATE_INDEX -1
 #define MAX_CHAR_SIZE 60
@@ -33,24 +43,16 @@
 #define LA_BUF_SIZE 2048
 #define LA_MEMORY_BASE_ADDRESS 0x60830000
 
-#if (defined(CONFIG_PT_MODE) || defined(CONFIG_LINUXPC_VERSION))
-static char *mactrace_path = "/lib/firmware/la_dump/mactrace";
-#else
-static char *mactrace_path = "/vendor/lib/firmware/la_dump/mactrace";
-#endif
-
-static char *reg_path = "/data/dumpinfo";
 #define REG_DUMP_SIZE 2048
 
 unsigned int trace_flag = 0;
 bool pt_mode = 0;
 bool rf_cali_type = 0; // 0: typical type, 1: special type
 static unsigned char offset_times = 0;
-static uint32_t g_csi_get_num = 0;
-uint32_t g_abnormal_csi_num = 0;
-struct csi_link_info_ind g_csi_link_info = {0};
+
 
 extern struct aml_trace_nl_info g_trace_nl_info;
+extern unsigned int g_rf_cfg_type;
 
 //hx add
 typedef unsigned char   U8;
@@ -129,7 +131,6 @@ typedef signed char   S8;
 #define EFUSE_BASE_17 0x17
 #define EFUSE_BASE_07 0x07
 #define EFUSE_BASE_10 0x10
-#define EFUSE_BASE_0B 0x0B
 #define EFUSE_BASE_00 0x00
 #define EFUSE_BASE_06 0x06
 
@@ -156,6 +157,11 @@ char **aml_cmd_char_phrase(char sep, const char *str, int *size)
     }
 
     ret = (char **)kzalloc((++count) * sizeof(char *), GFP_KERNEL);
+    if (!ret) {
+        AML_ERR("kzalloc fail\n");
+        return 0;
+    }
+
 
     for (i = 0; i < strlen(str); i++) {
         if (str[i] == sep) {
@@ -357,7 +363,8 @@ static int aml_set_scan_time(struct net_device *dev, int scan_duration)
     return 0;
 }
 
-int aml_get_reg_2(struct net_device *dev, unsigned int addr,union iwreq_data *wrqu, char *extra)
+static u32 aml_get_reg_2(struct net_device *dev, unsigned int addr,
+                         union iwreq_data *wrqu, char *extra)
 {
     unsigned int reg_val = 0;
     if (aml_bus_type == PCIE_MODE) {
@@ -384,7 +391,23 @@ int aml_get_reg_2(struct net_device *dev, unsigned int addr,union iwreq_data *wr
     return reg_val;
 }
 
-int aml_get_reg(struct net_device *dev, char *str_addr, union iwreq_data *wrqu, char *extra)
+int aml_get_rf_low_power_flag(struct net_device *dev, char *str_addr, union iwreq_data *wrqu, char *extra)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    unsigned int reg_val = 0;
+    unsigned int lp_en = 0;
+
+    reg_val = _aml_get_efuse(aml_vif, EFUSE_BASE_07);
+    lp_en = ((reg_val >> 26) & 0x3);
+
+    wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "&0x%08x", lp_en);
+    wrqu->data.length++;
+
+    return 0;
+}
+
+static int aml_get_reg(struct net_device *dev, char *str_addr,
+                       union iwreq_data *wrqu, char *extra)
 {
     unsigned int addr = 0;
     unsigned int reg_val = 0;
@@ -416,9 +439,8 @@ int aml_get_reg(struct net_device *dev, char *str_addr, union iwreq_data *wrqu, 
     return 0;
 }
 
-int aml_set_reg(struct net_device *dev, int addr, int val)
+static int aml_set_reg(struct net_device *dev, int addr, int val)
 {
-
     if (aml_bus_type != PCIE_MODE) {
         struct aml_vif *aml_vif = netdev_priv(dev);
         struct aml_hw *aml_hw = aml_vif->aml_hw;
@@ -449,9 +471,22 @@ int aml_sdio_usb_start_test(struct net_device *dev, int val)
     unsigned int j = 0;
     unsigned char test_time = val;
     unsigned int data_len = 600;
+    unsigned char *set_buf;
+    unsigned char *get_buf;
+    unsigned int len = 610;
 
-    unsigned char set_buf[610] = {0};
-    unsigned char get_buf[610] = {0};
+    set_buf = kzalloc(len, GFP_KERNEL);
+    if (!set_buf) {
+        AML_ERR("kzalloc set_buf fail\n");
+        return -ENOMEM;
+    }
+
+    get_buf = kzalloc(len, GFP_KERNEL);
+    if (!get_buf) {
+        AML_ERR("kzalloc get_buf fail\n");
+        kfree(set_buf);
+        return -ENOMEM;
+    }
 
     AML_INFO("sdio/usb stress testing start\n");
 
@@ -578,6 +613,9 @@ int aml_sdio_usb_start_test(struct net_device *dev, int val)
     }
 
     AML_INFO("sdio/usb stress testing end, times:%d\n", test_time);
+
+    kfree(set_buf);
+    kfree(get_buf);
     return 0;
 }
 
@@ -633,7 +671,8 @@ int reg_cca_cond_get(struct aml_hw *aml_hw)
     return 0;
 }
 
-int aml_get_rf_reg(struct net_device *dev, char *str_addr, union iwreq_data *wrqu, char *extra)
+static int aml_get_rf_reg(struct net_device *dev,
+                          char *str_addr, union iwreq_data *wrqu, char *extra)
 {
     unsigned int addr = 0;
     unsigned int reg_val = 0;
@@ -646,124 +685,6 @@ int aml_get_rf_reg(struct net_device *dev, char *str_addr, union iwreq_data *wrq
     wrqu->data.length++;
 
 //    AML_INFO("Get reg addr: 0x%08x value: 0x%08x\n", addr, reg_val);
-    return 0;
-}
-
-int aml_get_csi_debug_info(struct net_device *dev, union iwreq_data *wrqu, char *extra)
-{
-    unsigned int num_csi_set = 0;
-    unsigned int num_csi_abnormal = 0;
-
-    num_csi_set = g_csi_get_num;
-    g_csi_get_num = 0;
-
-    num_csi_abnormal = g_abnormal_csi_num;
-    g_abnormal_csi_num = 0;
-
-    wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "set_num:%08d, idle:%d, not_ready:%d", num_csi_set, (num_csi_abnormal >> 16), (num_csi_abnormal & 0xffff));
-    wrqu->data.length++;
-    return 0;
-}
-
-
-int aml_get_csi_link_info(struct net_device *dev, union iwreq_data *wrqu)
-{
-    unsigned int ret_copy = 0;
-    struct csi_link_info_ind ind;
-
-    memset(&ind, 0, sizeof(struct csi_link_info_ind));
-
-    ind.bw = g_csi_link_info.bw;
-    ind.nss = g_csi_link_info.nss;
-    ind.protocol_mode = g_csi_link_info.protocol_mode;
-
-    AML_INFO("link_info bw:%d nss:%d format:%d\n", ind.bw, ind.nss, ind.protocol_mode);
-
-    wrqu->data.length = sizeof(ind);
-    ret_copy = copy_to_user(wrqu->data.pointer, (void*)&ind, wrqu->data.length);
-    if (ret_copy != 0)
-        AML_INFO("copy csi linkinfo to user failed, failed num:%d%%%d", ret_copy, wrqu->data.length);
-    wrqu->data.length = 0;
-
-    return 0;
-}
-
-int aml_get_csi_status_com(struct net_device *dev, union iwreq_data *wrqu)
-{
-    unsigned int ret_copy = 0;
-    struct csi_com_status_get_ind ind;
-
-    memset(&ind, 0, sizeof(struct csi_com_status_get_ind));
-    aml_csi_status_com_read(dev, &ind);
-
-    AML_INFO("time_stamp: %llu \n", ind.time_stamp);
-    AML_INFO("mac_ra:     %02X%02X-%02X%02X-%02X%02X \n", ind.mac_ra[0], ind.mac_ra[1], ind.mac_ra[2], ind.mac_ra[3], ind.mac_ra[4], ind.mac_ra[5]);
-    AML_INFO("mac_ta:     %02X%02X-%02X%02X-%02X%02X \n", ind.mac_ta[0], ind.mac_ta[1], ind.mac_ta[2], ind.mac_ta[3], ind.mac_ta[4], ind.mac_ta[5]);
-    AML_INFO("freq_band:  %u \n", ind.frequency_band);
-    AML_INFO("bw:         %u \n", ind.bw);
-    AML_INFO("rssi:       %d %d \n", ind.rssi[0], ind.rssi[1]);
-    AML_INFO("snr:        %u \n", ind.snr);
-    AML_INFO("noise:      %u \n", ind.noise);
-    AML_INFO("phase_incr: %d \n", ind.phase_incr);
-    AML_INFO("pro_mode:   0x%x \n", ind.protocol_mode);
-    AML_INFO("frame_type: 0x%x \n", ind.frame_type);
-    AML_INFO("chain_num:  %u \n", ind.chain_num);
-    AML_INFO("tones_num:  %u \n", ind.tones_num);
-    AML_INFO("chan_index: %u \n", ind.primary_channel_index);
-    AML_INFO("phyerr:------- \n");
-    AML_INFO("rate:       %u \n", ind.rate);
-    AML_INFO("agc_code:   %u %u \n", ind.agc_code[0], ind.agc_code[1]);
-    AML_INFO("channel:    %u \n", ind.channel);
-    AML_INFO("packet_idx:--- \n");
-    AML_INFO("nrx:        %u \n", ind.nrx);
-    AML_INFO("ntx:        %u \n", ind.ntx);
-    AML_INFO("perm:--------- \n");
-    AML_INFO("csi_len:    %u \n", ind.csi_len);
-    AML_INFO("payload_len:---\n");
-    AML_INFO("extra_info:--- \n");
-    AML_INFO("sequence_no:%u \n", ind.sequence_no);
-    AML_INFO("csi_ready  :%u \n", ind.csi_ready);
-    AML_INFO("abnormal_csi:%x\n", ind.csi_abnormal_info);
-
-    wrqu->data.length = sizeof(ind);
-    ret_copy = copy_to_user(wrqu->data.pointer, (void*)&ind, wrqu->data.length);
-    if (ret_copy != 0)
-        AML_INFO("copy csi com to user failed, failed num:%d%%%d", ret_copy, wrqu->data.length);
-    wrqu->data.length = 0;
-
-    g_csi_get_num++;
-    return 0;
-}
-
-int aml_get_csi_status_sp(struct net_device *dev, union iwreq_data *wrqu, char* arg_iw)
-{
-    unsigned int ret_copy = 0;
-    struct csi_sp_status_get_ind ind;
-    int csi_mode = simple_strtol(arg_iw, NULL, 0);
-    int i = 0;
-
-    if (!((csi_mode == 0x11) || (csi_mode == 0x12) || (csi_mode == 0x21) || (csi_mode == 0x22)))
-    {
-        AML_ERR("cmd format failed!\n");
-        return 0;
-    }
-
-    memset(&ind, 0, sizeof(struct csi_sp_status_get_ind));
-    aml_csi_status_sp_read(dev, csi_mode, &ind);
-
-    AML_INFO("csi_mode:0x%02x csi data_len:0x%02x\n", csi_mode, ind.data_len);
-
-    for (i = 0; i < ind.data_len; i = i + 1)
-    {
-        AML_INFO("index 0x%02x: 0x%08x\n", i, ind.csi[i]);
-    }
-
-    wrqu->data.length = sizeof(ind.data_len) + sizeof(struct csi_complex) * ind.data_len;
-    ret_copy = copy_to_user(wrqu->data.pointer, (void*)&ind, wrqu->data.length);
-    if (ret_copy != 0)
-        AML_INFO("copy csi sp to user failed, failed num:%d%%%d", ret_copy, wrqu->data.length);
-    wrqu->data.length = 0;
-
     return 0;
 }
 
@@ -811,7 +732,7 @@ int aml_set_csi_runtime(struct net_device *dev, char* arg_iw)
     }
 
     if (req.time_total == 0)
-        aml_send_csi_data_to_user(&(req.time_total), sizeof(req.time_total), AML_CSI_FUNC_STOP);
+        aml_send_csi_data_to_user((char *)&(req.time_total), sizeof(req.time_total), AML_CSI_FUNC_STOP);
 
     AML_INFO("csi set sample_time_interval:%d time_total:%d ping_time_interval:%d gateway_ip:0x%x", req.sample_time_interval, req.time_total, req.ping_time_interval, req.gateway_ip);
     aml_csi_runtime_set(dev, &req);
@@ -822,9 +743,18 @@ int aml_set_csi_runtime(struct net_device *dev, char* arg_iw)
     return 0;
 }
 
+extern void aml_get_temperature(unsigned int* temperature);
+static int aml_print_temperature(union iwreq_data *wrqu, char *extra)
+{
+    unsigned int temp = 0;
+    aml_get_temperature(&temp);
+    wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, " %d (celsius degrees)", temp);
+    return wrqu->data.length + 1;
+}
+
 int aml_set_csi(struct net_device *dev, char* arg_iw)
 {
-    struct csi_set_req req;
+    struct csi_set_req req = {0};
     int cmd_arg;
     char **arg;
     char sep = '-';
@@ -839,6 +769,9 @@ int aml_set_csi(struct net_device *dev, char* arg_iw)
         }
     }
 
+    g_csi_upload_num = 0;
+    g_abnormal_csi_num = 0;
+
     /**cmd format："mask-nss-protocol mode-bw-frame type-addr1-addr2"
     #arg0-mask filter meaning：
     #arg1-BIT0：nss
@@ -847,7 +780,7 @@ int aml_set_csi(struct net_device *dev, char* arg_iw)
     #arg4-BIT3：frame type
     #arg5-BIT4：tx addr1
     #arg6-BIT5：rx addr2
-    **/
+    */
     if (count != 6)
         return 0;
 
@@ -897,6 +830,12 @@ int aml_set_csi(struct net_device *dev, char* arg_iw)
                 req.mac_ta[i] = simple_strtoul(mac_addr[i], NULL, 16);
             }
         }
+        else {
+            kfree(arg);
+            AML_ERR("cmd format failed!\n");
+            return 0;
+        }
+
         for (i = 0; i < MAC_ADDR_LEN; i++) {
             kfree(mac_addr[i]);
         }
@@ -918,16 +857,20 @@ int aml_set_csi(struct net_device *dev, char* arg_iw)
                 req.mac_ra[i] = simple_strtoul(mac_addr[i], NULL, 16);
             }
         }
+        else {
+            kfree(arg);
+            AML_ERR("cmd format failed!\n");
+            return 0;
+        }
+
         for (i = 0; i < MAC_ADDR_LEN; i++) {
             kfree(mac_addr[i]);
         }
         kfree(mac_addr);
     }
 
-    AML_INFO("csi set mask:0x%x nss:%x mode:%x bw:%x type:%x addr1:%02x%02x:%02x%02x:%02x%02x addr2:%02x%02x:%02x%02x:%02x%02x",
-            req.mask, req.rxv2_nss, req.protocol_mode, req.bw, req.frame_type,
-            req.mac_ra[0],req.mac_ra[1],req.mac_ra[2],req.mac_ra[3],req.mac_ra[4],req.mac_ra[5],
-            req.mac_ta[0],req.mac_ta[1],req.mac_ta[2],req.mac_ta[3],req.mac_ta[4],req.mac_ta[5]);
+    AML_INFO("csi set mask:0x%x nss:%x mode:%x bw:%x type:0x%x tx addr:%pM rx addr:%pM ",
+            req.mask, req.rxv2_nss, req.protocol_mode, req.bw, req.frame_type, req.mac_ta, req.mac_ra);
 
     aml_csi_set(dev, &req);
 
@@ -951,7 +894,7 @@ static int aml_log_levels_set(char *config, char *result)
         int l;
 
         line = skip_spaces(line);
-        if (line[0] == '\0' || line[0] == '#')
+        if (!line || (line[0] == '\0') || (line[0] == '#'))
             continue;
 
         name = strim(strsep(&line, "="));
@@ -1074,7 +1017,80 @@ static int aml_set_ps_mode(struct net_device *dev, int ps_mode)
         return -1;
     }
     AML_INFO("set ps_mode:0x%x success\n", ps_mode);
-    return aml_send_me_set_ps_mode(aml_hw, ps_mode);
+    return aml_send_me_set_ps_mode(aml_hw, ps_mode, false);
+}
+
+static int aml_set_reg_legacy(struct net_device *dev, char *str_param,
+    union iwreq_data *wrqu, char *extra)
+{
+    int set0 = 0;
+    int set1 = 0;
+    int set2 = 0;
+    int set3 = 0;
+    int legacy_set1 = 0;
+    int legacy_set2 = 0;
+
+    if (sscanf(str_param, "%08x %08x %08x %08x", &set0, &set1, &set2, &set3) != 4) {
+        AML_ERR("param error \n");
+    }
+
+    legacy_set1 = set1 | set0 << 16;
+    legacy_set2 = set3 | set2 << 16;
+    AML_INFO("%08x %08x %08x %08x, legacy_set1 %08x, legacy_set2 %08x", set0, set1, set2, set3, legacy_set1, legacy_set2);
+    aml_set_reg(dev, legacy_set1, legacy_set2);
+
+    return 0;
+}
+
+static int aml_set_rf_reg_legacy(struct net_device *dev, char *str_param,
+    union iwreq_data *wrqu, char *extra)
+{
+    int set0 = 0;
+    int set1 = 0;
+    int set2 = 0;
+    int set3 = 0;
+    int legacy_set1 = 0;
+    int legacy_set2 = 0;
+
+    if (sscanf(str_param, "%08x %08x %08x %08x", &set0, &set1, &set2, &set3) != 4) {
+        AML_ERR("param error \n");
+    }
+
+    legacy_set1 = set1 | set0 << 16;
+    legacy_set2 = set3 | set2 << 16;
+    AML_INFO("%08x %08x %08x %08x, legacy_set1 %08x, legacy_set2 %08x", set0, set1, set2, set3, legacy_set1, legacy_set2);
+    aml_rf_reg_write(dev, legacy_set1, legacy_set2);
+
+    return 0;
+}
+/// No protection
+#define PROT_NO_PROT            (0x0 << 14)
+/// Self-CTS
+#define PROT_SELF_CTS           (0x1 << 14)
+/// RTS-CTS with intended receiver
+#define PROT_RTS_CTS            (0x2 << 14)
+static int aml_set_prot_type(union iwreq_data *wrqu, char *extra, struct net_device *dev, char *str_param)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw * aml_hw = aml_vif->aml_hw;
+    u32 prot_type = 0;
+
+    if (!strcmp(str_param, "rtscts") || !strcmp(str_param, "RTSCTS")) {
+        prot_type = PROT_RTS_CTS;
+        wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, " Set the protection type to rts-cts");
+    } else if (!strcmp(str_param, "selfcts") || !strcmp(str_param, "SELFCTS")) {
+        prot_type = PROT_SELF_CTS;
+        wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, " Set the protection type to self-cts");
+    } else if (!strcmp(str_param, "none") || !strcmp(str_param, "NONE")) {
+        prot_type = PROT_NO_PROT;
+        wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, " Set the protection type to none");
+    } else {
+        wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, " param err[%s], Only supports three types: rtscts, selfcts and none.", str_param);
+        wrqu->data.length++;
+        return 0;
+    }
+    wrqu->data.length++;
+    return _aml_set_prot_type(aml_hw, prot_type);
 }
 
 int aml_set_early_bcn_mode(struct net_device *dev, char *str_param, union iwreq_data *wrqu, char *extra)
@@ -1082,18 +1098,20 @@ int aml_set_early_bcn_mode(struct net_device *dev, char *str_param, union iwreq_
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw * aml_hw = aml_vif->aml_hw;
     struct early_bcn early_beacon;
+    int early_bcn_mode = 0;
 
-    early_beacon.early_bcn_mode = 0;
+    //early_beacon.early_bcn_mode = 0;
     early_beacon.ie_counter = 0;
     early_beacon.element_1 = 0;
     early_beacon.element_2 = 0;
     early_beacon.element_3 = 0;
     early_beacon.element_4 = 0;
 
-    if (sscanf(str_param, "%d %d %d %d %d %d", &early_beacon.early_bcn_mode,
+    if (sscanf(str_param, "%d %hhd %hhd %hhd %hhd %hhd", &early_bcn_mode,
         &early_beacon.ie_counter, &early_beacon.element_1, &early_beacon.element_2, &early_beacon.element_3, &early_beacon.element_4) != 6) {
-        printk("set_early_beacon_end erro \n");
+        AML_ERR("set_early_beacon_end erro \n");
     }
+    early_beacon.early_bcn_mode = early_bcn_mode;
 
     AML_INFO("set early beacon mode: 0x%x success\n", early_beacon.early_bcn_mode);
     return aml_send_early_beacon_mode(aml_hw, &early_beacon);
@@ -1101,23 +1119,24 @@ int aml_set_early_bcn_mode(struct net_device *dev, char *str_param, union iwreq_
 
 static int aml_send_twt_req(struct net_device *dev, char *str_param, union iwreq_data *wrqu, char *extra)
 {
-    struct twt_conf_tag twt_conf;
+    struct twt_conf_tag twt_conf = {};
     struct twt_setup_cfm twt_setup_cfm;
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
     u8 setup_type = MAC_TWT_SETUP_REQ;
     u8 vif_idx = aml_vif->vif_index;
+    u8 wake_dur_unit = 0;
 
-    twt_conf.flow_type = 0;
-    twt_conf.wake_int_exp = 0;
-    twt_conf.wake_dur_unit = 0;
-    twt_conf.min_twt_wake_dur = 0;
-    twt_conf.wake_int_mantissa = 0;
-
-    if (sscanf(str_param, "%d %d %d %d %d %d", &setup_type,
-        &twt_conf.flow_type, &twt_conf.wake_int_exp, &twt_conf.wake_dur_unit, &twt_conf.min_twt_wake_dur, &twt_conf.wake_int_mantissa) != 6) {
+    if (sscanf(str_param, "%hhd %hhd %hhd %hhd %hhd %hd",
+               &setup_type,
+               &twt_conf.flow_type,
+               &twt_conf.wake_int_exp,
+               &wake_dur_unit,
+               &twt_conf.min_twt_wake_dur,
+               &twt_conf.wake_int_mantissa) != 6) {
         AML_ERR("param erro \n");
     }
+    twt_conf.wake_dur_unit = wake_dur_unit;
 
     wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "setup_type=%d flow_type=%d wake_int_exp=%d wake_dur_unit=%d min_twt_wake_dur=%d wake_int_mantissa=%d",
         setup_type, twt_conf.flow_type, twt_conf.wake_int_exp,  twt_conf.wake_dur_unit,  twt_conf.min_twt_wake_dur, twt_conf.wake_int_mantissa);
@@ -1128,12 +1147,7 @@ static int aml_send_twt_req(struct net_device *dev, char *str_param, union iwreq
 }
 
 #ifdef CONFIG_AML_NAN_SUPPORT
-extern int aml_nan_send_enable_req(struct aml_hw *aml_hw, wifi_nan_cfg *nan_conf);
-extern int aml_nan_send_publish_request(struct aml_hw *aml_hw, wifi_nan_publish_cfg *pub_conf);
-extern int aml_nan_send_subscribe_request(struct aml_hw *aml_hw, wifi_nan_subscribe_cfg *subscribe_conf);
-extern int aml_nan_send_follow_up_msg(struct aml_hw *aml_hw, wifi_nan_followup_cfg *followup_conf);
-
-static int aml_nan_enable(struct net_device *dev, char *str_param, union iwreq_data *wrqu, char *extra)
+static int aml_nan_cmd_enable(struct net_device *dev, char *str_param, union iwreq_data *wrqu, char *extra)
 {
     wifi_nan_cfg nan_conf = {0};
     struct aml_vif *aml_vif = netdev_priv(dev);
@@ -1144,7 +1158,7 @@ static int aml_nan_enable(struct net_device *dev, char *str_param, union iwreq_d
         AML_ERR("param erro \n");
     }
 
-    ret = aml_nan_send_enable_req(aml_hw, &nan_conf);
+    ret = aml_nan_enable(aml_hw, &nan_conf);
     if (!ret) {
         wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK,
             "[NAN] Enable conf: op_channel[%d], master_pref[%d], scan_time[%d], warm_up_sec[%d].",
@@ -1156,49 +1170,66 @@ static int aml_nan_enable(struct net_device *dev, char *str_param, union iwreq_d
     return 0;
 }
 
-static int aml_nan_cmd_publish_req(struct net_device *dev, char *str_param, union iwreq_data *wrqu, char *extra)
+static int aml_nan_cmd_disable(struct net_device *dev, union iwreq_data *wrqu, char *extra)
 {
-    wifi_nan_publish_cfg publish_req = {0};
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
-    int publish_id = 0;
+    int ret = 0;
 
-    if (sscanf(str_param, "%s %s", &publish_req.service_name, &publish_req.svc_info) != 2) {
-        AML_ERR("param erro \n");
+    ret = aml_nan_disable(aml_hw);
+    if (!ret) {
+        wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "[NAN] NAN disable success.");
+        wrqu->data.length++;
+        AML_INFO("[%s]\n", extra);
+    } else {
+        wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "[NAN] NAN disable fail.");
+        wrqu->data.length++;
+        AML_INFO("[%s]\n", extra);
     }
-    publish_req.type = NAN_PUBLISH_UNSOLICITED;
-    publish_id = aml_nan_send_publish_request(aml_hw, &publish_req);
 
-    wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "[NAN]Publish service_name: %s, svc_info: %s, publish_id: %d",
-        publish_req.service_name, publish_req.svc_info, publish_id);
-    wrqu->data.length++;
-
-    AML_INFO("[%s]\n", extra);
     return 0;
 }
 
-static int aml_nan_cmd_subscribe_req(struct net_device *dev, char *str_param, union iwreq_data *wrqu, char *extra)
+static int aml_nan_cmd_publish_service(struct net_device *dev, union iwreq_data *wrqu, char *extra)
 {
-    wifi_nan_subscribe_cfg subscribe_conf = {0};
+    publish_config pub_cfg = {0};
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
-    int subscribe_id = 0;
+    uint8_t publish_id = 0;
 
-    if (sscanf(str_param, "%s %s", &subscribe_conf.service_name, &subscribe_conf.svc_info) != 2) {
-        AML_ERR("param erro \n");
+    pub_cfg.publish_type = NAN_PUBLISH_UNSOLICITED;
+    publish_id = aml_nan_publish_service(aml_hw, &pub_cfg, 0, false);
+    if (publish_id > 0) {
+        wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "[NAN]Publish service '%s' [publish id - %d]",
+            pub_cfg.service_name, publish_id);
+        wrqu->data.length++;
+
+        AML_INFO("%s\n", extra);
     }
 
-    subscribe_id = aml_nan_send_subscribe_request(aml_hw, &subscribe_conf);
-
-    wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "[NAN]subscribe service_name: %s, svc_info: %s, subscribe_id: %d",
-        subscribe_conf.service_name, subscribe_conf.svc_info, subscribe_id);
-    wrqu->data.length++;
-
-    AML_INFO("[%s]\n", extra);
     return 0;
 }
 
-static int aml_nan_cmd_followup_send(struct net_device *dev, char *str_param, union iwreq_data *wrqu, char *extra)
+static int aml_nan_cmd_subscribe_service(struct net_device *dev, union iwreq_data *wrqu, char *extra)
+{
+    subscribe_config sub_cfg = {0};
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    uint8_t subscribe_id = 0;
+
+    subscribe_id = aml_nan_subscribe_service(aml_hw, &sub_cfg, 0, false);
+    if (subscribe_id > 0) {
+        wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "[NAN]subscribe service '%s' [subscribe id - %d]",
+            sub_cfg.service_name, subscribe_id);
+        wrqu->data.length++;
+
+        AML_INFO("%s\n", extra);
+    }
+
+    return 0;
+}
+
+static int aml_nan_cmd_send_message(struct net_device *dev, char *str_param, union iwreq_data *wrqu, char *extra)
 {
     wifi_nan_followup_cfg fllowup_conf = {0};
     struct aml_vif *aml_vif = netdev_priv(dev);
@@ -1214,7 +1245,7 @@ static int aml_nan_cmd_followup_send(struct net_device *dev, char *str_param, un
         AML_ERR("param erro: peer_mac is err.\n");
     }
 
-    ret = aml_nan_send_follow_up_msg(aml_hw, &fllowup_conf);
+    ret = aml_nan_send_message(aml_hw, &fllowup_conf);
     if (!ret) {
         wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK,
             "[NAN] inst_id [%d] Send message [%s] to NAN Peer ["MACSTR"], peer_inst_id [%d].",
@@ -1225,22 +1256,46 @@ static int aml_nan_cmd_followup_send(struct net_device *dev, char *str_param, un
 
     return 0;
 }
+
+static int aml_nan_cmd_cancel_service(struct net_device *dev, int svc_id)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+
+    aml_nan_cancel_service(aml_hw, svc_id);
+    return 0;
+}
+
 #endif
+
+static int aml_trig_sec_test(struct net_device *dev, union iwreq_data *wrqu, char *extra)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw * aml_hw = aml_vif->aml_hw;
+    uint32_t retval = 0;
+
+    _aml_trig_sec_test(aml_hw, &retval);
+
+    msleep(1000);
+    /* TODO: the register should be consistent with FW side */
+    retval = aml_get_reg_2(dev, 0x00a10020, wrqu, extra);
+
+    return 0;
+}
 
 void aml_print_buf(char *buf, int len)
 {
-    char tmp[PRINT_BUF_SIZE] = {0};
-    while (1) {
-        if (len > PRINT_BUF_SIZE) {
-            memcpy(tmp, buf, PRINT_BUF_SIZE);
-            AML_INFO("%s", tmp);
-            len -= PRINT_BUF_SIZE;
-            buf += PRINT_BUF_SIZE;
-        } else {
-            AML_INFO("%s\n", buf);
-            break;
-        }
+    char *lf;
+
+    while (len > 0 && (lf = memchr(buf, '\n', len))) {
+        *lf++ = '\0';
+        AML_INFO("%s\n", buf);
+        len -= lf - buf;
+        buf = lf;
     }
+
+    if (len > 0)
+        AML_INFO("%s\n", buf);
 }
 
 int aml_print_acs_info(struct aml_hw *priv)
@@ -1252,7 +1307,7 @@ int aml_print_acs_info(struct aml_hw *priv)
     int len = 0;
     int band, chan_cnt;
 
-    if ((buf = vmalloc(buf_size)) == NULL)
+    if ((buf = vzalloc(buf_size)) == NULL)
         return -1;
 
     mutex_lock(&priv->dbgdump.mutex);
@@ -1288,196 +1343,63 @@ int aml_print_acs_info(struct aml_hw *priv)
 
 int aml_print_last_rx_info(struct aml_hw *priv, struct aml_sta *sta)
 {
-#ifdef CONFIG_AML_DEBUGFS
-    struct aml_rx_rate_stats *rate_stats;
-    char *buf;
-    int bufsz, i, len = 0;
-    unsigned int fmt, pre, bw, nss, mcs, gi, dcm = 0;
-    struct rx_vector_1 *last_rx;
-    char hist[] = "##################################################";
-    int hist_len = sizeof(hist) - 1;
-    u8 nrx;
-    bool bprintk = 1;
-    rate_stats = &sta->stats.rx_rate;
-    bufsz = (rate_stats->rate_cnt * ( 50 + hist_len) + 200);
-    if (bprintk == 0) {
-        buf = kmalloc(bufsz + 1, GFP_ATOMIC);
-        if (buf == NULL)
-            return 0;
-    }
+    char *buf = print_sta_rate_stats(priv, sta);
 
-    // Get number of RX paths
-    nrx = (priv->version_cfm.version_phy_1 & MDM_NRX_MASK) >> MDM_NRX_LSB;
+    if (buf) {
+        aml_print_buf(buf, strlen(buf));
 
-    if (bprintk) {
-        printk("\nRX rate info for %02X:%02X:%02X:%02X:%02X:%02X:\n", sta->mac_addr[0], sta->mac_addr[1], sta->mac_addr[2],
-                sta->mac_addr[3], sta->mac_addr[4], sta->mac_addr[5]);
-    }
-    else {
-        len += scnprintf(buf, bufsz,
-                            "\nRX rate info for %02X:%02X:%02X:%02X:%02X:%02X:\n",
-                            sta->mac_addr[0], sta->mac_addr[1], sta->mac_addr[2],
-                            sta->mac_addr[3], sta->mac_addr[4], sta->mac_addr[5]);
-    }
-
-    // Display Statistics
-    for (i = 0; i < rate_stats->size; i++) {
-        if (rate_stats->table && rate_stats->table[i]) {
-            union aml_rate_ctrl_info rate_config;
-            u64 percent = div_u64(rate_stats->table[i] * 1000, rate_stats->cpt);
-            u64 p;
-            int ru_size;
-            u32 rem;
-
-            idx_to_rate_cfg(i, &rate_config, &ru_size);
-            len += print_rate_from_cfg(&buf[len], bufsz - len,
-                                       rate_config.value, NULL, ru_size, bprintk);
-            p = div_u64((percent * hist_len), 1000);
-            //len += scnprintf(&buf[len], bufsz - len, ": %9d(%2d.%1d%%)%.*s\n",
-            //                 rate_stats->table[i],
-            //                 div_u64_rem(percent, 10, &rem), rem, p, hist);
-            if (bprintk) {
-                printk(KERN_CONT ": %9d(%2d.%1d%%)\n", rate_stats->table[i], div_u64_rem(percent, 10, &rem), rem);
-            } else {
-                len += scnprintf(&buf[len], bufsz - len, ": %9d(%2d.%1d%%)\n",
-                                 rate_stats->table[i],
-                                 div_u64_rem(percent, 10, &rem), rem);
-            }
-        }
-    }
-
-    // Display detailed info of the last received rate
-    last_rx = &sta->stats.last_rx.rx_vect1;
-    if (bprintk) {
-        printk("\nLast received rate\n"
-               "type               rate     LDPC STBC BEAMFM DCM DOPPLER\n");
-    } else {
-        len += scnprintf(&buf[len], bufsz - len,"\nLast received rate\n"
-                         "type               rate     LDPC STBC BEAMFM DCM DOPPLER %s\n",
-                         (nrx > 1) ? "rssi1(dBm) rssi2(dBm)" : "rssi(dBm)");
-    }
-
-    fmt = last_rx->format_mod;
-    bw = last_rx->ch_bw;
-    pre = last_rx->pre_type;
-    if (fmt >= FORMATMOD_HE_SU) {
-        mcs = last_rx->he.mcs;
-        nss = last_rx->he.nss;
-        gi = last_rx->he.gi_type;
-        if ((fmt == FORMATMOD_HE_MU) || (fmt == FORMATMOD_HE_ER))
-            bw = last_rx->he.ru_size;
-        dcm = last_rx->he.dcm;
-    } else if (fmt == FORMATMOD_VHT) {
-        mcs = last_rx->vht.mcs;
-        nss = last_rx->vht.nss;
-        gi = last_rx->vht.short_gi;
-    } else if (fmt >= FORMATMOD_HT_MF) {
-        mcs = last_rx->ht.mcs % 8;
-        nss = last_rx->ht.mcs / 8;
-        gi = last_rx->ht.short_gi;
-    } else {
-        BUG_ON((mcs = legrates_lut[last_rx->leg_rate].idx) == -1);
-        nss = 0;
-        gi = 0;
-    }
-
-    len += print_rate(&buf[len], bufsz - len, fmt, nss, mcs, bw, gi, pre, dcm, NULL, bprintk);
-
-    /* flags for HT/VHT/HE */
-    if (fmt >= FORMATMOD_HE_SU) {
-        if (bprintk) {
-            printk(KERN_CONT "  %c    %c     %c    %c     %c",
-                     last_rx->he.fec ? 'L' : ' ',
-                     last_rx->he.stbc ? 'S' : ' ',
-                     last_rx->he.beamformed ? 'B' : ' ',
-                     last_rx->he.dcm ? 'D' : ' ',
-                     last_rx->he.doppler ? 'D' : ' ');
-        } else {
-            len += scnprintf(&buf[len], bufsz - len, "  %c    %c     %c    %c     %c",
-                             last_rx->he.fec ? 'L' : ' ',
-                             last_rx->he.stbc ? 'S' : ' ',
-                             last_rx->he.beamformed ? 'B' : ' ',
-                             last_rx->he.dcm ? 'D' : ' ',
-                             last_rx->he.doppler ? 'D' : ' ');
-        }
-    } else if (fmt == FORMATMOD_VHT) {
-        if (bprintk) {
-            printk(KERN_CONT "  %c    %c     %c           ",
-                     last_rx->vht.fec ? 'L' : ' ',
-                     last_rx->vht.stbc ? 'S' : ' ',
-                     last_rx->vht.beamformed ? 'B' : ' ');
-        } else {
-            len += scnprintf(&buf[len], bufsz - len, "  %c    %c     %c           ",
-                             last_rx->vht.fec ? 'L' : ' ',
-                             last_rx->vht.stbc ? 'S' : ' ',
-                             last_rx->vht.beamformed ? 'B' : ' ');
-        }
-    } else if (fmt >= FORMATMOD_HT_MF) {
-        if (bprintk) {
-            printk(KERN_CONT "  %c    %c                  ",
-                     last_rx->ht.fec ? 'L' : ' ',
-                     last_rx->ht.stbc ? 'S' : ' ');
-        } else {
-            len += scnprintf(&buf[len], bufsz - len, "  %c    %c                  ",
-                             last_rx->ht.fec ? 'L' : ' ',
-                             last_rx->ht.stbc ? 'S' : ' ');
-        }
-    } else {
-        if (bprintk) {
-            printk(KERN_CONT "                         ");
-        } else {
-            len += scnprintf(&buf[len], bufsz - len, "                         ");
-        }
-    }
-    #if 0
-    if (nrx > 1) {
-        /* coverity[assigned_value] - len is used */
-        len += scnprintf(&buf[len], bufsz - len, "       %-4d       %d\n",
-                         last_rx->rssi1, last_rx->rssi1);
-    } else {
-        /* coverity[assigned_value] - len is used */
-        len += scnprintf(&buf[len], bufsz - len, "      %d\n", last_rx->rssi1);
-    }
-    #endif
-    if (!bprintk) {
-        aml_print_buf(buf, len);
         kfree(buf);
     }
-#endif
     return 0;
 }
 
-int aml_print_stats(struct aml_hw *priv)
+static int aml_print_stats(struct aml_hw *aml_hw, struct net_device *dev, char *req, char *buf)
 {
-    char *buf;
-    int ret;
+    struct aml_stats *stats = aml_hw->stats;
+    int bufsz = IW_PRIV_SIZE_MASK;
+    int ret = 0;
     int i, skipped;
-#ifdef CONFIG_AML_SPLIT_TX_BUF
     int per;
-#endif
-    int bufsz = (NX_TXQ_CNT) * 20 + (ARRAY_SIZE(priv->stats->amsdus_rx) + 1) * 40
-        + (ARRAY_SIZE(priv->stats->ampdus_tx) * 30);
 
-    buf = kmalloc(bufsz, GFP_ATOMIC);
-    if (buf == NULL)
-        return 0;
+    if (strcasecmp(req, "reset") == 0) {
+        memset(stats, 0, sizeof(*stats));
+        return scnprintf(buf, bufsz, "\nreset all stats\n");
+    }
 
-    ret = scnprintf(buf, bufsz, "TXQs CFM balances ");
+    if (strcasecmp(req, "rx_trans") == 0) {
+        u32 total = stats->rx_trans_total ? : 1;
+        u32 size = AML_RX_TRANS_RANK_SIZE_0;
+
+        ret += scnprintf(&buf[ret], bufsz - ret, "\nRX_TRANS(SDIO/USB)\nbytes          times\n");
+        for (i = 0; i < AML_RX_TRANS_RANK_NUM - 1; i++, size >>= 1) {
+            per = DIV_ROUND_UP(stats->rx_trans[i] * 100, total);
+            ret += scnprintf(&buf[ret], bufsz - ret, ">=%6u: %10u(%3d%%)\n",
+                             size, stats->rx_trans[i], per);
+        }
+        per = DIV_ROUND_UP(stats->rx_trans[i] * 100, total);
+        ret += scnprintf(&buf[ret], bufsz - ret, "< %6u: %10u(%3d%%)\n",
+                         (size << 1), stats->rx_trans[i], per);
+        return ret;
+    }
+
+    ret += scnprintf(&buf[ret], bufsz - ret, "\nTXQs CFM balances\n");
     for (i = 0; i < NX_TXQ_CNT; i++)
         ret += scnprintf(&buf[ret], bufsz - ret,
-                            "    [%1d]:%3d", i,
-                            priv->stats->cfm_balance[i]);
+                            "[%1d]:%3d\n", i,
+                            stats->cfm_balance[i]);
 
-    ret += scnprintf(&buf[ret], bufsz - ret, "\n");
+    /* show ampdu stats only */
+    if (strcasecmp(req, "ampdu") == 0)
+        goto print_ampdu;
 
 #ifdef CONFIG_AML_SPLIT_TX_BUF
     ret += scnprintf(&buf[ret], bufsz - ret,
-                       "\nAMSDU[len]         done          failed   received\n");
+                       "\nAMSDU\n[len]      done         failed   received\n");
     for (i = skipped = 0; i < NX_TX_PAYLOAD_MAX; i++) {
-        if (priv->stats->amsdus[i].done) {
-            per = DIV_ROUND_UP((priv->stats->amsdus[i].failed) *
-                                100, priv->stats->amsdus[i].done);
-        } else if (priv->stats->amsdus_rx[i]) {
+        if (stats->amsdus[i].done) {
+            per = DIV_ROUND_UP((stats->amsdus[i].failed) *
+                                100, stats->amsdus[i].done);
+        } else if (stats->amsdus_rx[i]) {
             per = 0;
         } else {
             per = 0;
@@ -1485,36 +1407,36 @@ int aml_print_stats(struct aml_hw *priv)
             continue;
         }
         if (skipped) {
-            ret += scnprintf(&buf[ret], bufsz - ret, "     ...\n");
+            ret += scnprintf(&buf[ret], bufsz - ret, "\t...\n");
             skipped = 0;
         }
 
         ret += scnprintf(&buf[ret], bufsz - ret,
-                          "     [%2d]      %10d %8d(%3d%%) %10d\n",    i ? i + 1 : i,
-                          priv->stats->amsdus[i].done,
-                          priv->stats->amsdus[i].failed, per,
-                          priv->stats->amsdus_rx[i]);
+                          "[%2d] %10d %8d(%3d%%) %10d\n",    i ? i + 1 : i,
+                          stats->amsdus[i].done,
+                          stats->amsdus[i].failed, per,
+                          stats->amsdus_rx[i]);
     }
 
-    for (; i < ARRAY_SIZE(priv->stats->amsdus_rx); i++) {
-        if (!priv->stats->amsdus_rx[i]) {
+    for (; i < ARRAY_SIZE(stats->amsdus_rx); i++) {
+        if (!stats->amsdus_rx[i]) {
             skipped = 1;
             continue;
         }
         if (skipped) {
-            ret += scnprintf(&buf[ret], bufsz - ret, "     ...\n");
+            ret += scnprintf(&buf[ret], bufsz - ret, "\t...\n");
             skipped = 0;
         }
 
         ret += scnprintf(&buf[ret], bufsz - ret,
-                          "     [%2d]                                %10d\n",
-                          i + 1, priv->stats->amsdus_rx[i]);
+                          "[%2d]                           %10d\n",
+                          i + 1, stats->amsdus_rx[i]);
     }
 #else
     ret += scnprintf(&buf[ret], bufsz - ret,
-                      "\nAMSDU[len]     received\n");
-    for (i = skipped = 0; i < ARRAY_SIZE(priv->stats->amsdus_rx); i++) {
-        if (!priv->stats->amsdus_rx[i]) {
+                      "\nAMSDU\n[len]   received\n");
+    for (i = skipped = 0; i < ARRAY_SIZE(stats->amsdus_rx); i++) {
+        if (!stats->amsdus_rx[i]) {
             skipped = 1;
             continue;
         }
@@ -1524,157 +1446,51 @@ int aml_print_stats(struct aml_hw *priv)
         }
 
         ret += scnprintf(&buf[ret], bufsz - ret,
-                          "     [%2d]      %10d\n",
-                          i + 1, priv->stats->amsdus_rx[i]);
+                          "[%2d]      %10d\n",
+                          i + 1, stats->amsdus_rx[i]);
     }
 
 #endif /* CONFIG_AML_SPLIT_TX_BUF */
 
+print_ampdu:
     ret += scnprintf(&buf[ret], bufsz - ret,
-                       "\nAMPDU[len]       done  received\n");
-    for (i = skipped = 0; i < ARRAY_SIZE(priv->stats->ampdus_tx); i++) {
-        if (!priv->stats->ampdus_tx[i] && !priv->stats->ampdus_rx[i]) {
+                       "\nAMPDU\n[len]     done  received\n");
+    for (i = skipped = 0; i < ARRAY_SIZE(stats->ampdus_tx); i++) {
+        if (!stats->ampdus_tx[i] && !stats->ampdus_rx[i]) {
             skipped = 1;
             continue;
         }
         if (skipped) {
-            ret += scnprintf(&buf[ret], bufsz - ret,  "   ...\n");
+            ret += scnprintf(&buf[ret], bufsz - ret,  "...\n");
             skipped = 0;
         }
 
         ret += scnprintf(&buf[ret], bufsz - ret,
-                         "     [%2d]     %9d %9d\n", i ? i + 1 : i,
-                         priv->stats->ampdus_tx[i], priv->stats->ampdus_rx[i]);
+                         "[%2d] %9d %9d\n", i ? i + 1 : i,
+                         stats->ampdus_tx[i], stats->ampdus_rx[i]);
     }
     /* coverity[assigned_value] - len is used */
     ret += scnprintf(&buf[ret], bufsz - ret,
-                     "#mpdu missed          %9d\n",
-                     priv->stats->ampdus_rx_miss);
+                     "#mpdu missed   %9d\n",
+                     stats->ampdus_rx_miss);
 
-    aml_print_buf(buf, ret);
-    kfree(buf);
-    return 0;
-
+    ret += scnprintf(&buf[ret], bufsz - ret, "\nsyntax:\n"
+                     "  iwpriv %s get_stats [reset|rx_trans|ampdu]\n", dev->name);
+    return ret;
 }
 
 int aml_print_rate_info( struct aml_hw *aml_hw, struct aml_sta *sta)
 {
-    char *buf;
-    int bufsz, len = 0;
-    int i = 0;
-    int error = 0;
-    struct me_rc_stats_cfm me_rc_stats_cfm;
-    unsigned int no_samples;
-    struct st *st;
-     /* Forward the information to the LMAC */
-    if ((error = aml_send_me_rc_stats(aml_hw, sta->sta_idx, &me_rc_stats_cfm)))
-        return error;
+    char *buf = print_sta_rc_stats(aml_hw, sta);
 
-    no_samples = me_rc_stats_cfm.no_samples;
-    if (no_samples == 0)
-        return 0;
-
-    bufsz = no_samples * LINE_MAX_SZ + 500;
-
-    buf = kmalloc(bufsz + 1, GFP_ATOMIC);
-    if (buf == NULL)
-        return 0;
-
-    st = kmalloc(sizeof(struct st) * no_samples, GFP_ATOMIC);
-    if (st == NULL) {
+    if (buf) {
+        aml_print_buf(buf, strlen(buf));
         kfree(buf);
         return 0;
     }
 
-    for (i = 0; i < no_samples; i++) {
-        unsigned int tp, eprob;
-        len = print_rate_from_cfg(st[i].line, LINE_MAX_SZ,
-                                  me_rc_stats_cfm.rate_stats[i].rate_config,
-                                  (int *)&st[i].r_idx, 0, 0);
-
-        if (me_rc_stats_cfm.sw_retry_step != 0) {
-            len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len,  "%c",
-                    me_rc_stats_cfm.retry_step_idx[me_rc_stats_cfm.sw_retry_step] == i ? '*' : ' ');
-        }
-        else {
-            len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len, " ");
-        }
-        len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len, "%c",
-                me_rc_stats_cfm.retry_step_idx[0] == i ? 'T' : ' ');
-        len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len, "%c",
-                me_rc_stats_cfm.retry_step_idx[1] == i ? 't' : ' ');
-        len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len, "%c ",
-                me_rc_stats_cfm.retry_step_idx[2] == i ? 'P' : ' ');
-
-        tp = me_rc_stats_cfm.tp[i] / 10;
-        len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len, " %4u.%1u",
-                         tp / 10, tp % 10);
-
-        eprob = ((me_rc_stats_cfm.rate_stats[i].probability * 1000) >> 16) + 1;
-        scnprintf(&st[i].line[len],LINE_MAX_SZ - len,
-                         "  %4u.%1u %5u(%6u)  %6u",
-                         eprob / 10, eprob % 10,
-                         me_rc_stats_cfm.rate_stats[i].success,
-                         me_rc_stats_cfm.rate_stats[i].attempts,
-                         me_rc_stats_cfm.rate_stats[i].sample_skipped);
-    }
-    len = scnprintf(buf, bufsz ,
-                     "\nTX rate info for %02X:%02X:%02X:%02X:%02X:%02X:\n",
-                     sta->mac_addr[0], sta->mac_addr[1], sta->mac_addr[2],
-                     sta->mac_addr[3], sta->mac_addr[4], sta->mac_addr[5]);
-
-    len += scnprintf(&buf[len], bufsz - len,
-            "   # type               rate             tpt   eprob    ok(   tot)   skipped\n");
-
-    // add sorted statistics to the buffer
-    sort(st, no_samples, sizeof(st[0]), compare_idx, NULL);
-    for (i = 0; i < no_samples; i++) {
-        len += scnprintf(&buf[len], bufsz - len, "%s\n", st[i].line);
-    }
-
-    // display HE TB statistics if any
-    if (me_rc_stats_cfm.rate_stats[RC_HE_STATS_IDX].rate_config != 0) {
-        unsigned int tp, eprob;
-        struct rc_rate_stats *rate_stats = &me_rc_stats_cfm.rate_stats[RC_HE_STATS_IDX];
-        int ru_index = rate_stats->ru_and_length & 0x07;
-        int ul_length = rate_stats->ru_and_length >> 3;
-
-        len += scnprintf(&buf[len], bufsz - len,
-                         "\nHE TB rate info:\n");
-
-        len += scnprintf(&buf[len], bufsz - len,
-                "     type               rate             tpt   eprob    ok(   tot)   ul_length\n     ");
-        len += print_rate_from_cfg(&buf[len], bufsz - len, rate_stats->rate_config,
-                                   NULL, ru_index, 0);
-
-        tp = me_rc_stats_cfm.tp[RC_HE_STATS_IDX] / 10;
-        len += scnprintf(&buf[len], bufsz - len, "      %4u.%1u",
-                         tp / 10, tp % 10);
-
-        eprob = ((rate_stats->probability * 1000) >> 16) + 1;
-        len += scnprintf(&buf[len],bufsz - len,
-                         "  %4u.%1u %5u(%6u)  %6u\n",
-                         eprob / 10, eprob % 10,
-                         rate_stats->success,
-                         rate_stats->attempts,
-                         ul_length);
-    }
-
-    len += scnprintf(&buf[len], bufsz - len, "\n MPDUs AMPDUs AvLen trialP");
-    /* coverity[assigned_value] - len is used */
-    len += scnprintf(&buf[len], bufsz - len, "\n%6u %6u %3d.%1d %6u\n",
-                     me_rc_stats_cfm.ampdu_len,
-                     me_rc_stats_cfm.ampdu_packets,
-                     me_rc_stats_cfm.avg_ampdu_len >> 16,
-                     ((me_rc_stats_cfm.avg_ampdu_len * 10) >> 16) % 10,
-                     me_rc_stats_cfm.sample_wait);
-
-    aml_print_buf(buf, len);
-    kfree(buf);
-    kfree(st);
-
-    return 0;
-}
+    return -1;
+ }
 
 static int aml_get_rate_info(struct net_device *dev)
 {
@@ -1698,25 +1514,6 @@ static int aml_cca_check(struct net_device *dev)
     reg_cca_cond_get(aml_hw);
     return 0;
 }
-
-static int aml_get_tx_stats(struct net_device *dev)
-{
-    struct aml_vif *aml_vif = netdev_priv(dev);
-    struct aml_hw *aml_hw = aml_vif->aml_hw;
-
-    aml_print_stats(aml_hw);
-    return 0;
-}
-
-static int aml_clear_tx_stats(struct net_device *dev)
-{
-    struct aml_vif *aml_vif = netdev_priv(dev);
-    struct aml_hw *aml_hw = aml_vif->aml_hw;
-
-    memset(aml_hw->stats, 0, sizeof(struct aml_stats));
-    return 0;
-}
-
 
 static int aml_get_acs_info(struct net_device *dev)
 {
@@ -1917,10 +1714,6 @@ static int aml_get_sdio_tx_enh_stats(struct net_device *dev)
     AML_INFO("drv_txcfm_idx :%u\n", cfmlog.drv_txcfm_idx);
     AML_INFO("cfm_read_cnt :%u\n", cfmlog.cfm_read_cnt);
     AML_INFO("cfm_read_avg_blk :%u\n", cfmlog.cfm_read_blk_cnt/cfmlog.cfm_read_cnt);
-    AML_INFO("<------------------------rx info-------------------------->\n");
-    AML_INFO("rx cnt in rx:%u\n", cfmlog.rx_cnt_in_rx);
-    AML_INFO("mpdu in rx      :%u\n", cfmlog.mpdu_in_rx);
-    AML_INFO("avg_mpdu in one rx:%u\n", cfmlog.avg_mpdu_in_one_rx);
     AML_INFO("<---------------------- amsdu log ------------------------>\n");
     AML_INFO("tx total count      :%u\n", blog.tx_tot_cnt);
     AML_INFO("tx amsdu rate       :%u\n", blog.tx_amsdu_cnt*1000/blog.tx_tot_cnt);
@@ -2078,34 +1871,35 @@ static int aml_get_buf_state(struct net_device *dev)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
+    u8 fw_state = 0;
 
     if (aml_bus_type == PCIE_MODE) {
-        printk("invalid cmd\n");
+        AML_ERR("invalid cmd\n");
         return -1;
     }
-    printk("=============================\n");
+    AML_INFO("=============================\n");
     if (aml_hw->la_enable) {
-        printk("la status:       ON\n");
+        AML_INFO("la status:       ON\n");
     } else {
-        printk("la status:       OFF\n");
+        AML_INFO("la status:       OFF\n");
     }
 
     if (aml_bus_type == USB_MODE) {
         if (aml_hw->trace_enable) {
-            printk("trace status:    ON\n");
+            AML_INFO("trace status:    ON\n");
         } else {
-            printk("trace status:    OFF\n");
+            AML_INFO("trace status:    OFF\n");
         }
     }
-
-    if (aml_hw->rx_buf_state & FW_BUFFER_EXPAND) {
-        printk("trx status:      rxbuf large, txbuf small\n");
-    } else if (aml_hw->rx_buf_state & FW_BUFFER_NARROW) {
-        printk("trx status:      rxbuf small, txbuf large\n");
+    fw_state = aml_shared_mem_layout_get(&aml_hw->rx);
+    if (fw_state == AML_RX_BUF_EXPAND) {
+        AML_INFO("trx status:      rxbuf large, txbuf small\n");
+    } else if (fw_state == AML_RX_BUF_NARROW) {
+        AML_INFO("trx status:      rxbuf small, txbuf large\n");
     } else {
-        printk("err: rx_buf_state[%x]\n", aml_hw->rx_buf_state);
+        AML_ERR("err: rx.fw.state[%x]\n", fw_state);
     }
-    printk("=============================\n");
+    AML_INFO("=============================\n");
     return 0;
 }
 
@@ -2131,10 +1925,11 @@ static int aml_set_buf_state(struct net_device *dev, int buf_state)
 
 static int aml_get_tcp_ack_info(struct net_device *dev)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
     struct aml_tcp_sess_mgr *ack_mgr = &aml_hw->ack_mgr;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+
     AML_INFO("ack_mgr->max_drop_cnt=%u\n", atomic_read(&ack_mgr->max_drop_cnt));
     AML_INFO("ack_mgr->enable=%u\n", atomic_read(&ack_mgr->enable));
     AML_INFO("ack_mgr->max_timeout=%u\n", atomic_read(&ack_mgr->max_timeout));
@@ -2156,7 +1951,8 @@ static int aml_get_rssi(struct net_device *dev)
     bcn_rssi = (AML_REG_READ(aml_plat, AML_ADDR_MAC_PHY, REG_OF_SYNC_RSSI) & 0xffff);
 
     AML_INFO("------------ rssi info ------------\n");
-    AML_INFO("bcn_rssi: %d dbm, (wf0: %d dbm, wf1: %d dbm, rxv: %d dbm) \n", bcn_rssi - 256, ((rssi_indivaul & 0x0000ff00) >> 8) - 256, (rssi_indivaul & 0x000000ff) - 256, ((rssi_indivaul & 0x00ff0000) >> 16) - 256);
+    AML_INFO("bcn_rssi: %d dbm, (wf0: %d dbm, wf1: %d dbm) \n", bcn_rssi - 256, ((rssi_indivaul & 0x0000ff00) >> 8) - 256, (rssi_indivaul & 0x000000ff) - 256);
+    return 0;
 }
 
 static int aml_set_txpage_once(struct net_device *dev, int txpage)
@@ -2210,9 +2006,18 @@ static int aml_set_tcp_delay_ack(struct net_device *dev, int enable,int min_size
     struct aml_hw * aml_hw = aml_vif->aml_hw;
     struct aml_tcp_sess_mgr *ack_mgr = &aml_hw->ack_mgr;
 
-    atomic_set(&ack_mgr->enable, enable);
+    if (enable == 0)
+        atomic_set(&ack_mgr->force_delay_ack, FORCE_DELAY_ACK_DISABLE);
+    else if (enable == 1)
+        atomic_set(&ack_mgr->force_delay_ack, FORCE_DELAY_ACK_ENABLE);
+    else
+        atomic_set(&ack_mgr->force_delay_ack, FORCE_DELAY_ACK_AUTO);
+
+    if ((enable == 0) || (enable == 1))
+        atomic_set(&ack_mgr->enable, enable);
+
     ack_mgr->ack_winsize = min_size;
-    AML_INFO("set tcp delay ack:ack_mgr->enable=%u,ack_mgr->ack_winsize is %dK\n", atomic_read(&ack_mgr->enable),ack_mgr->ack_winsize);
+    AML_INFO("set tcp delay ack:ack_mgr->force_delay_ack=%u,ack_mgr->ack_winsize is %dK\n", atomic_read(&ack_mgr->force_delay_ack),ack_mgr->ack_winsize);
     return 0;
 }
 
@@ -2235,7 +2040,6 @@ static int aml_set_tcp_delay_ack_rssi_thr(struct net_device *dev, int rssi_l_thr
 static int aml_set_cca_timer(struct net_device *dev, int timer1, int timer2, int cycle)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
-    struct aml_hw * aml_hw = aml_vif->aml_hw;
     if (!timer1 || !timer2) {
         return 0;
     }
@@ -2244,6 +2048,63 @@ static int aml_set_cca_timer(struct net_device *dev, int timer1, int timer2, int
     return 0;
 }
 
+struct agg_req_t g_agg_parse = {0};
+static int aml_set_aggregation(struct net_device *dev, int dir, int amsdu, int ampdu)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw * aml_hw = aml_vif->aml_hw;
+
+    if (dir & AMSDU_TX) {
+        aml_hw->mod_params->amsdu_maxnb = amsdu;
+        aml_adjust_amsdu_maxnb(aml_hw);
+
+        g_agg_parse.dir |= dir;
+        g_agg_parse.amsdu_tx = amsdu;
+        g_agg_parse.ampdu_tx = ampdu;
+
+    } else {
+        g_agg_parse.dir |= dir;
+        g_agg_parse.amsdu_rx = amsdu;
+        g_agg_parse.ampdu_rx = ampdu;
+    }
+    AML_INFO("dir=0x%x, agg_num=0x%x\n", g_agg_parse.dir, g_agg_parse.agg_num);
+    _aml_set_aggregation(aml_vif, g_agg_parse.dir, g_agg_parse.agg_num);
+    return 0;
+}
+
+static int aml_set_agg_tx(struct net_device *dev, int amsdu_num, int ampdu_num)
+{
+    AML_INFO("cmd format: iwpriv wlan0 set_agg_tx [amsdu_num] [ampdu_num]\n");
+    AML_INFO("Restore Defaults: iwpriv wlan0 set_agg_tx 6 0\n");
+    return aml_set_aggregation(dev, AMSDU_TX|AMPDU_TX, amsdu_num, ampdu_num);
+}
+
+static int aml_set_agg_rx(struct net_device *dev, int amsdu_en, int ampdu_num)
+{
+    AML_INFO("cmd format: iwpriv wlan0 set_agg_rx [amsdu_en] [ampdu_num]\n");
+    AML_INFO("rx amsdu: 0: disable, otherwise: enable\n");
+    AML_INFO("Restore Defaults: iwpriv wlan0 set_agg_rx 1 0\n");
+    return aml_set_aggregation(dev, AMSDU_RX|AMPDU_RX, amsdu_en, ampdu_num);
+}
+
+static int aml_get_aggregation(struct net_device *dev)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw * aml_hw = aml_vif->aml_hw;
+    u8_l amsdu_rx = (g_agg_parse.dir & AMSDU_RX) ? g_agg_parse.amsdu_rx : 1;
+    if (amsdu_rx) // 0: disable, otherwise: enable
+        amsdu_rx = 1;
+
+    if (g_agg_parse.ampdu_tx) {
+        g_agg_parse.ampdu_tx = MIN(g_agg_parse.ampdu_tx, g_agg_parse.def_ampdu_tx);
+    } else {
+        g_agg_parse.ampdu_tx = g_agg_parse.def_ampdu_tx;
+    }
+
+    AML_INFO("amsdu_tx_num=%d, ampdu_tx_num=%d, amsdu_rx_en=%d, ampdu_rx_num=%d\n",
+             aml_hw->mod_params->amsdu_maxnb, g_agg_parse.ampdu_tx, amsdu_rx, g_agg_parse.ampdu_rx);
+    return 0;
+}
 
 static int aml_set_max_drop_num(struct net_device *dev, int num)
 {
@@ -2253,10 +2114,7 @@ static int aml_set_max_drop_num(struct net_device *dev, int num)
 
     if (num < 0)
     {
-        if (aml_bus_type == USB_MODE)
-            num = MAX_DROP_TCP_ACK_CNT_USB;
-        else
-            num = MAX_DROP_TCP_ACK_CNT;
+        num = MAX_DROP_TCP_ACK_CNT;
         atomic_set(&ack_mgr->max_drop_cnt, num);
         atomic_set(&ack_mgr->dynamic_adjust, 1);
     }
@@ -2317,7 +2175,6 @@ static int aml_set_txdesc_trigger_ths(struct net_device *dev, int cnt)
     return 0;
 }
 
-extern void extern_wifi_set_enable(int is_on);
 static int aml_set_bus_timeout_test(struct net_device *dev, int enable)
 {
 #ifndef CONFIG_PT_MODE
@@ -2326,15 +2183,12 @@ static int aml_set_bus_timeout_test(struct net_device *dev, int enable)
     struct aml_hw *aml_hw = aml_vif->aml_hw;
     struct aml_plat *aml_plat = aml_hw->plat;
 
-    if (aml_bus_type == PCIE_MODE) {
+    if (aml_bus_type == PCIE_MODE)
         return 0;
-     }
+
     if (enable) {
-#ifndef CONFIG_LINUXPC_VERSION
-        extern_wifi_set_enable(0);
-#endif
+        aml_wifi_power_on(0);
         reg = AML_REG_READ(aml_plat, AML_ADDR_SYSTEM, AGCCCCACAL0_ADDR_CT);
-        AML_INFO("++++++++++++++++enable bus timeout for recovery test !!!\n");
     }
 #endif
     return 0;
@@ -2355,7 +2209,7 @@ static int aml_send_twt_teardown(struct net_device *dev, int id)
     return _aml_send_twt_teardown(aml_hw, &twt_teardown, &twt_teardown_cfm);
 }
 
-int aml_set_macbypass(struct net_device *dev, unsigned int dpd_cfg)
+static int aml_set_macbypass(struct net_device *dev, unsigned int dpd_cfg)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
 
@@ -2366,7 +2220,7 @@ int aml_set_macbypass(struct net_device *dev, unsigned int dpd_cfg)
     return 0;
 }
 
-int aml_set_stop_macbypass(struct net_device *dev)
+static int aml_set_stop_macbypass(struct net_device *dev)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
 
@@ -2377,7 +2231,7 @@ int aml_set_stop_macbypass(struct net_device *dev)
     return 0;
 }
 
-int aml_set_stbc(struct net_device *dev, int stbc_on)
+static int aml_set_stbc(struct net_device *dev, int stbc_on)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
@@ -2402,6 +2256,18 @@ int aml_set_stbc(struct net_device *dev, int stbc_on)
     return _aml_set_stbc(aml_hw, aml_vif->vif_index, stbc_on);
 }
 
+int aml_set_lp_flag(struct net_device *dev, int lp_en)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    unsigned int reg_val = 0;
+
+    reg_val = _aml_get_efuse(aml_vif, EFUSE_BASE_07);
+    reg_val = reg_val | (lp_en << 26);
+    aml_set_efuse(dev, EFUSE_BASE_07, reg_val);
+
+    return 0;
+}
+
 static int aml_get_stbc(struct net_device *dev)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
@@ -2410,73 +2276,8 @@ static int aml_get_stbc(struct net_device *dev)
     return 0;
 }
 
-static int aml_dump_reg(struct net_device *dev, int addr, int size)
-{
-    struct aml_vif *aml_vif = netdev_priv(dev);
-    struct aml_hw *aml_hw = aml_vif->aml_hw;
-    struct aml_plat *aml_plat = aml_hw->plat;
-
-    int len = 0, i = 0;
-    char *la_buf = NULL;
-
-    u8 *map_address = NULL;
-    u8 *address = (u8 *)(unsigned long)addr;
-
-    if (aml_bus_type == PCIE_MODE) {
-        map_address = aml_pci_get_map_address(dev, addr);
-        if (!map_address) {
-            AML_ERR("map_address erro\n");
-            return 0;
-        }
-    }
-
-    la_buf = kmalloc(REG_DUMP_SIZE, GFP_ATOMIC);
-    if (!la_buf) {
-         AML_ERR("malloc buf erro\n");
-         return 0;
-    }
-
-    memset(la_buf, 0, REG_DUMP_SIZE);
-    len += scnprintf(&la_buf[len], (REG_DUMP_SIZE - len), "========dump range [0x%x ---- 0x%x], Size 0x%x========\n",
-            address, address + size, size);
-
-    if (aml_bus_type == PCIE_MODE) {
-        for (i = 0; i < size / 4; i++) {
-            len += scnprintf(&la_buf[len], (REG_DUMP_SIZE - len), "addr 0x%x ----- value 0x%x\n",
-                address + i * 4, aml_pci_readl(map_address+ i*4));
-
-            if ((REG_DUMP_SIZE - len) < 38) {
-                aml_send_log_to_user(la_buf, len, AML_MEM_DUMP_UPLOAD);
-
-                len = 0;
-                memset(la_buf, 0, REG_DUMP_SIZE);
-            }
-        }
-    } else {
-        for (i = 0; i < size / 4; i++) {
-            len += scnprintf(&la_buf[len], (REG_DUMP_SIZE - len), "addr 0x%x ----- value 0x%x\n",
-                address + i * 4, AML_REG_READ(aml_plat, 0, (u64)(address + i*4)));
-
-            if ((REG_DUMP_SIZE - len) < 38) {
-                aml_send_log_to_user(la_buf, len, AML_MEM_DUMP_UPLOAD);
-
-                len = 0;
-                memset(la_buf, 0, REG_DUMP_SIZE);
-            }
-        }
-    }
-    if (len != 0) {
-        aml_send_log_to_user(la_buf, len, AML_MEM_DUMP_UPLOAD);
-    }
-
-err:
-    kfree(la_buf);
-    return 0;
-}
-
 static int aml_emb_la_dump(struct net_device *dev)
 {
-    struct file *fp = NULL;
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
     struct aml_plat *aml_plat = aml_hw->plat;
@@ -2533,12 +2334,115 @@ static int aml_emb_la_dump(struct net_device *dev)
          }
     }
 
-err:
     kfree(la_buf);
     return 0;
 }
 
-int aml_set_pt_calibration(struct net_device *dev, int pt_cali_val)
+static int aml_dump_reg(struct net_device *dev, int addr, int size)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+
+    int len = 0, i = 0;
+    char *la_buf = NULL;
+
+    u8 *map_address = NULL;
+    u8 *address = (u8 *)(unsigned long)addr;
+
+    if (aml_bus_type == PCIE_MODE) {
+        map_address = aml_pci_get_map_address(dev, addr);
+        if (!map_address) {
+            AML_ERR("map_address erro\n");
+            return 0;
+        }
+    }
+
+    la_buf = kmalloc(REG_DUMP_SIZE, GFP_ATOMIC);
+    if (!la_buf) {
+         AML_ERR("malloc buf erro\n");
+         return 0;
+    }
+
+    memset(la_buf, 0, REG_DUMP_SIZE);
+    len += scnprintf(&la_buf[len], (REG_DUMP_SIZE - len), "========dump range [%px ---- %px], Size 0x%x========\n",
+            address, address + size, size);
+
+    if (aml_bus_type == PCIE_MODE) {
+        for (i = 0; i < size / 4; i++) {
+            len += scnprintf(&la_buf[len], (REG_DUMP_SIZE - len), "addr %px ----- value 0x%x\n",
+                address + i * 4, aml_pci_readl(map_address+ i*4));
+
+            if ((REG_DUMP_SIZE - len) < 38) {
+                aml_send_log_to_user(la_buf, len, AML_MEM_DUMP_UPLOAD);
+
+                len = 0;
+                memset(la_buf, 0, REG_DUMP_SIZE);
+            }
+        }
+    } else {
+        for (i = 0; i < size / 4; i++) {
+            len += scnprintf(&la_buf[len], (REG_DUMP_SIZE - len), "addr 0x%x ----- value 0x%x\n",
+                             addr + i * 4, hi_reg_read(aml_hw, addr + i*4));
+
+            if ((REG_DUMP_SIZE - len) < 38) {
+                aml_send_log_to_user(la_buf, len, AML_MEM_DUMP_UPLOAD);
+
+                len = 0;
+                memset(la_buf, 0, REG_DUMP_SIZE);
+            }
+        }
+    }
+    if (len != 0) {
+        aml_send_log_to_user(la_buf, len, AML_MEM_DUMP_UPLOAD);
+    }
+
+    kfree(la_buf);
+    return 0;
+}
+
+int aml_dump_mem(struct aml_hw *aml_hw, int addr, int size)
+{
+    int len = 0, i = 0;
+    char *la_buf = NULL;
+
+    if (aml_bus_type == PCIE_MODE)
+        return 0;
+
+    la_buf = kmalloc(REG_DUMP_SIZE, GFP_ATOMIC);
+    if (!la_buf) {
+         AML_ERR("malloc buf erro\n");
+         return 0;
+    }
+
+    AML_INFO("dump mem begin, from:0x%08x, size:0x%08x\n", addr, size);
+    memset(la_buf, 0, REG_DUMP_SIZE);
+    len += scnprintf(&la_buf[len], (REG_DUMP_SIZE - len), "========dump range [0x%x ---- 0x%x], Size 0x%x========\n",
+            addr, addr + size, size);
+
+    for (i = 0; i < size / 4; i++) {
+        len += scnprintf(&la_buf[len], (REG_DUMP_SIZE - len), "addr 0x%x ----- value 0x%x\n",
+                addr + i * 4, hi_reg_read(aml_hw, addr + i*4));
+
+        if ((REG_DUMP_SIZE - len) < 38) {
+            aml_send_log_to_user(la_buf, len, AML_MEM_DUMP_UPLOAD);
+
+            len = 0;
+            memset(la_buf, 0, REG_DUMP_SIZE);
+        }
+    }
+
+    if (len != 0) {
+        aml_send_log_to_user(la_buf, len, AML_MEM_DUMP_UPLOAD);
+    }
+    AML_INFO("dump mem finished, from:0x%08x, size:0x%08x\n", addr, size);
+
+    kfree(la_buf);
+    return 0;
+}
+
+
+
+static int aml_set_pt_calibration(struct net_device *dev, int pt_cali_val)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
 
@@ -2555,16 +2459,17 @@ int aml_set_pt_calibration(struct net_device *dev, int pt_cali_val)
     return 0;
 }
 
-int aml_set_rx_start(struct net_device *dev)
+static int aml_set_rx_start(struct net_device *dev)
 {
     aml_set_reg(dev, 0X60C0600C, 0x00000001);
     aml_set_reg(dev, 0X60C06000, 0x00000117);
     AML_INFO("PT Rx Start\n");
+    aml_set_reg(dev, 0x00f0007c, 0x7800d110);  //enable bt clock gating
 
     return 0;
 }
 
-int aml_set_rx_end(struct net_device *dev,union iwreq_data *wrqu, char *extra)
+static int aml_set_rx_end(struct net_device *dev,union iwreq_data *wrqu, char *extra)
 {
     int fcs_ok = 0;
     int fcs_err = 0;
@@ -2580,11 +2485,11 @@ int aml_set_rx_end(struct net_device *dev,union iwreq_data *wrqu, char *extra)
     wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "fcs_ok=%d, fcs_err=%d, fcs_rx_end=%d, rx_err=%d\n", fcs_ok, fcs_err, fcs_rx_end, rx_err);
     wrqu->data.length++;
     aml_set_reg(dev, 0x60c0b500, 0x00041000);
-    //aml_set_reg(dev, 0x00f0007c, 0x2000d110);  //bt clock enable
+    aml_set_reg(dev, 0x00f0007c, 0x2000d110);  //disable bt clk gating
     return 0;
 }
 
-int aml_set_rx(struct net_device *dev, int antenna, int channel)
+static int aml_set_rx(struct net_device *dev, int antenna, int channel)
 {
     AML_INFO("set antenna :%x\n", antenna);
     aml_set_reg(dev, 0x00a0b1b8, 0xc0003000);
@@ -2653,7 +2558,7 @@ int aml_set_rx(struct net_device *dev, int antenna, int channel)
     return 0;
 }
 
-int aml_set_2G_dc_tone(struct net_device *dev, int wf_mode)
+static int aml_set_2G_dc_tone(struct net_device *dev, int wf_mode)
 {
     aml_set_reg(dev, 0x00a0e018, 0x01110f00);
     aml_set_reg(dev, 0x00a0e010, 0x00002110);
@@ -2697,7 +2602,7 @@ int aml_set_2G_dc_tone(struct net_device *dev, int wf_mode)
     return 0;
 }
 
-int aml_set_5G_dc_tone(struct net_device *dev, int wf_mode)
+static int aml_set_5G_dc_tone(struct net_device *dev, int wf_mode)
 {
     aml_set_reg(dev, 0x00a0f018, 0x01110f00);
     aml_set_reg(dev, 0x00a0f010, 0x00002110);
@@ -2742,7 +2647,7 @@ int aml_set_5G_dc_tone(struct net_device *dev, int wf_mode)
     return 0;
 }
 
-int aml_set_tone(struct net_device *dev, int signal, int wf_mode)
+static int aml_set_tone(struct net_device *dev, int signal, int wf_mode)
 {
     AML_INFO("set %d G, signal_mode %d\n", signal, wf_mode);
 
@@ -2761,7 +2666,7 @@ int aml_set_tone(struct net_device *dev, int signal, int wf_mode)
     return 0;
 }
 
-int aml_stop_dc_tone(struct net_device *dev)
+static void aml_stop_dc_tone(struct net_device *dev)
 {
     aml_set_reg(dev, 0x00a0e408, 0x88200000);
     aml_set_reg(dev, 0x00a0e40c, 0x88200000);
@@ -2786,7 +2691,8 @@ static unsigned int tx_rate = 0;
 static unsigned int tx_param = 0;
 static unsigned int tx_param1 = 0;
 
-int aml_11b_siso_wf0_tx(struct net_device *dev, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_11b_siso_wf0_tx(struct net_device *dev,
+                               U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     if (rate == 1) {
         rate = 0x0;
@@ -2848,7 +2754,8 @@ int aml_11b_siso_wf0_tx(struct net_device *dev, U8 rate, U8 tx_pwr, U8 length, U
     return 0;
 }
 
-int aml_11b_siso_wf1_tx(struct net_device *dev, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_11b_siso_wf1_tx(struct net_device *dev,
+                               U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     if (rate == 1) {
         rate = 0x0;
@@ -2910,7 +2817,8 @@ int aml_11b_siso_wf1_tx(struct net_device *dev, U8 rate, U8 tx_pwr, U8 length, U
     return 0;
 }
 
-int aml_11ag_siso_wf0_tx(struct net_device *dev, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_11ag_siso_wf0_tx(struct net_device *dev,
+                                U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     if (rate == 6) {//6M
         rate = 0xb;
@@ -2981,7 +2889,8 @@ int aml_11ag_siso_wf0_tx(struct net_device *dev, U8 rate, U8 tx_pwr, U8 length, 
     return 0;
 }
 
-int aml_11ag_siso_wf1_tx(struct net_device *dev, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_11ag_siso_wf1_tx(struct net_device *dev,
+                                U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     if (rate == 6) {
         rate = 0xb;
@@ -3112,7 +3021,8 @@ int aml_ht_siso_wf0_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 len
 }
 
 //set ht 20/40m rate bw tx_pwr length
-int aml_ht_mimo_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_ht_mimo_tx(struct net_device *dev,
+                           U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     aml_set_reg(dev, 0x60c00840, 0x80010001);
     //aml_set_reg(dev, 0x00a0d084, 0x00020001);
@@ -3168,7 +3078,8 @@ int aml_ht_mimo_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 length,
     return 0;
 }
 
-int aml_ht_siso_wf1_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_ht_siso_wf1_tx(struct net_device *dev,
+                              U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     aml_set_reg(dev, 0x60c00840, 0x80010001);
     //aml_set_reg(dev, 0x00a0d084, 0x00020001);
@@ -3186,7 +3097,7 @@ int aml_ht_siso_wf1_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 len
     aml_set_reg(dev, 0x00a0b1b8, 0xc0003100);
     if (bw == 0x0) {
         aml_set_reg(dev, 0x60c00800, 0x00000110);
-    } else if(bw == 0x1) {
+    } else if (bw == 0x1) {
         aml_set_reg(dev, 0x60c00800, 0x00000111);
     }
     aml_set_reg(dev, 0x60c0088c, 0x00005050);
@@ -3227,7 +3138,8 @@ int aml_ht_siso_wf1_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 len
     return 0;
 }
 
-int aml_vht_siso_wf0_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_vht_siso_wf0_tx(struct net_device *dev,
+                               U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     aml_set_reg(dev, 0x60c00840, 0x80010001);
     //aml_set_reg(dev, 0x00a0d084, 0x00020001);
@@ -3287,7 +3199,8 @@ int aml_vht_siso_wf0_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 le
     return 0;
 }
 
-int aml_vht_mimo_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_vht_mimo_tx(struct net_device *dev,
+                           U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     aml_set_reg(dev, 0x60c00840, 0x80010001);
     //aml_set_reg(dev, 0x00a0d084, 0x00020001);
@@ -3348,7 +3261,8 @@ int aml_vht_mimo_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 length
     return 0;
 }
 
-int aml_vht_siso_wf1_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_vht_siso_wf1_tx(struct net_device *dev,
+                               U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     aml_set_reg(dev, 0x60c00840, 0x80010001);
     //aml_set_reg(dev, 0x00a0d084, 0x00020001);
@@ -3408,7 +3322,8 @@ int aml_vht_siso_wf1_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 le
     return 0;
 }
 
-int aml_hesu_siso_wf0_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_hesu_siso_wf0_tx(struct net_device *dev,
+                                U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     aml_set_reg(dev, 0x60c00840, 0x80010001);
     //aml_set_reg(dev, 0x00a0d084, 0x00020001);
@@ -3417,9 +3332,9 @@ int aml_hesu_siso_wf0_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 l
     aml_set_reg(dev, 0x60805014, 0x0000013f);
     if (bw == 0x0) {
         aml_set_reg(dev, 0x60805008, 0x00001100);
-    } else if(bw == 0x1) {
+    } else if (bw == 0x1) {
         aml_set_reg(dev, 0x60805008, 0x00001150);
-    } else if(bw == 0x2) {
+    } else if (bw == 0x2) {
         aml_set_reg(dev, 0x60805008, 0x000011a0);
     }
     aml_set_reg(dev, 0x60c0b004, 0x00000001);
@@ -3485,7 +3400,8 @@ int aml_hesu_siso_wf0_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 l
     return 0;
 }
 
-int aml_hesu_mimo_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_hesu_mimo_tx(struct net_device *dev,
+                            U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     aml_set_reg(dev, 0x60c00840, 0x80010001);
     //aml_set_reg(dev, 0x00a0d084, 0x00020001);
@@ -3562,7 +3478,8 @@ int aml_hesu_mimo_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 lengt
     return 0;
 }
 
-int aml_hesu_siso_wf1_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
+static int aml_hesu_siso_wf1_tx(struct net_device *dev,
+                                U8 bw, U8 rate, U8 tx_pwr, U8 length, U8 length1, U8 length2)
 {
     aml_set_reg(dev, 0x60c00840, 0x80010001);
     //aml_set_reg(dev, 0x00a0d084, 0x00020001);
@@ -3639,114 +3556,81 @@ int aml_hesu_siso_wf1_tx(struct net_device *dev, U8 bw, U8 rate, U8 tx_pwr, U8 l
 }
 
 extern struct COUNTRY_PWR_LIMIT_CFG country_pwr_limit_cfg;
-U8 aml_country_pwr_limit(U8 tx_pwr, int prot, U8 rate, U8 bw, U8 channel)
+U8 aml_country_pwr_limit(struct net_device *dev, U8 tx_pwr, int prot, U8 rate, U8 bw, U8 channel)
 {
-    U8 idx = 0;
     U8 limit_pwr = 0;
+    U8 filter_type = 0;
+    int8_t i = 0;
+    int8_t band = 0;
+    unsigned char ofdm_power = 0;
+    unsigned char dsss_power = 0;
 
-    if (prot == 0x0 || prot == 0x1) {
-        if (rate == 1) {
-            idx = 0;
-        }
-        else if (rate == 2) {
-            idx = 1;
-        }
-        else if (rate == 5) {
-            idx = 2;
-        }
-        else if (rate == 11) {
-            idx = 3;
-        }
-        else if (rate == 6) {
-            idx = 0;
-        }
-        else if (rate == 9) {
-            idx = 1;
-        }
-        else if (rate == 12) {
-            idx = 2;
-        }
-        else if (rate == 18) {
-            idx = 3;
-        }
-        else if (rate == 24) {
-            idx = 4;
-        }
-        else if (rate == 36) {
-            idx = 5;
-        }
-        else if (rate == 48) {
-            idx = 6;
-        }
-        else if (rate == 54) {
-            idx = 7;
-        }
-    }
-
-    if (channel > 14) { //5g
-  {
-            if (prot == 0x1) { //11a
-                limit_pwr = country_pwr_limit_cfg.wf5g_11a_limit[idx];
-            }
-            else if (prot == 0x2) { //11n
-                if (bw == 0x0) {
-                    limit_pwr = country_pwr_limit_cfg.wf5g_ht20_limit[idx];
-                }
-                else {
-                    limit_pwr = country_pwr_limit_cfg.wf5g_ht40_limit[idx];
-                }
-            }
-            else if (prot == 0x3) { //11ac
-                if (bw == 0x0) {
-                    limit_pwr = country_pwr_limit_cfg.wf5g_vht20_limit[idx];
-                }
-                else if (bw == 0x1) {
-                    limit_pwr = country_pwr_limit_cfg.wf5g_vht40_limit[idx];
-                }
-                else {
-                    limit_pwr = country_pwr_limit_cfg.wf5g_vht80_limit[idx];
-                }
-            }
-            else if (prot == 0x4) { //11ax
-                if (bw == 0x0) {
-                    limit_pwr = country_pwr_limit_cfg.wf5g_he20_limit[idx];
-                }
-                else if (bw == 0x1) {
-                    limit_pwr = country_pwr_limit_cfg.wf5g_he40_limit[idx];
-                }
-                else {
-                    limit_pwr = country_pwr_limit_cfg.wf5g_he80_limit[idx];
-                }
-            }
-        }
+    if (channel > 14)
+    {
+        band = 1;
     }
     else //2g
     {
- {
-            if (prot == 0x0) { //11b
-                limit_pwr = country_pwr_limit_cfg.wf2g_11b_limit[idx];
-            }
-            else if (prot == 0x1) { //11g
-                limit_pwr = country_pwr_limit_cfg.wf2g_11g_limit[idx];
-            }
-            else if (prot == 0x2) { //11n
-                if (bw == 0x0) {
-                    limit_pwr = country_pwr_limit_cfg.wf2g_ht20_limit[idx];
-                }
-                else {
-                    limit_pwr = country_pwr_limit_cfg.wf2g_ht40_limit[idx];
-                }
-            }
-            else if (prot == 0x4) { //11ax
-                if (bw == 0x0) {
-                    limit_pwr = country_pwr_limit_cfg.wf2g_he20_limit[idx];
-                }
-                else {
-                    limit_pwr = country_pwr_limit_cfg.wf2g_he40_limit[idx];
-                }
-            }
-        }
+        band = 0;
     }
+
+    aml_regdom_table_pwr_get(channel, band, &ofdm_power, &dsss_power);
+    if (prot == 0)
+    {
+        limit_pwr = dsss_power;
+    }
+    else
+    {
+        limit_pwr = ofdm_power;
+    }
+
+    filter_type = (limit_pwr >> 7);
+
+    for (i = 0; i < 11; i++)
+    {
+        aml_set_reg(dev, 0x00a0e5f0 + i*4, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].maskfilter[0+i]); //wf0 11b
+        aml_set_reg(dev, 0x00a0e530 + i*4, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].maskfilter[11+i]); //wf0 ofdm 20
+        aml_set_reg(dev, 0x00a0e55c + i*4, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].maskfilter[22+i]); //wf0 ofdm 40
+        aml_set_reg(dev, 0x00a0e588 + i*4, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].maskfilter[33+i]); //wf0 ofdm 80
+        aml_set_reg(dev, 0x00a0f5f0 + i*4, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].maskfilter[44+i]); //wf11 11b
+        aml_set_reg(dev, 0x00a0f530 + i*4, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].maskfilter[55+i]); //wf1 ofdm 20
+        aml_set_reg(dev, 0x00a0f55c + i*4, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].maskfilter[66+i]); //wf1 ofdm 40
+        aml_set_reg(dev, 0x00a0f588 + i*4, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].maskfilter[77+i]); //wf1 ofdm 80
+    }
+
+   limit_pwr = limit_pwr & 0x7f;
+
+   if (band == 0)
+   {
+       if (bw == 0)
+       {
+           aml_set_reg(dev, 0x00a0e5ec, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].mask_bw_cfg[0]); //wf0 11b
+           aml_set_reg(dev, 0x00a0f5ec, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].mask_bw_cfg[0]); //wf0 11b
+       }
+       else
+       {
+           aml_set_reg(dev, 0x00a0e5ec, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].mask_bw_cfg[1]); //wf0 11b
+           aml_set_reg(dev, 0x00a0f5ec, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].mask_bw_cfg[1]); //wf0 11b
+       }
+   }
+   else
+   {
+       if (bw == 0)
+       {
+           aml_set_reg(dev, 0x00a0e5ec, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].mask_bw_cfg[2]); //wf0 11b
+           aml_set_reg(dev, 0x00a0f5ec, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].mask_bw_cfg[2]); //wf0 11b
+       }
+       else if (bw == 1)
+       {
+           aml_set_reg(dev, 0x00a0e5ec, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].mask_bw_cfg[3]); //wf0 11b
+           aml_set_reg(dev, 0x00a0f5ec, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].mask_bw_cfg[3]); //wf0 11b
+       }
+       else
+       {
+           aml_set_reg(dev, 0x00a0e5ec, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].mask_bw_cfg[4]); //wf0 11b
+           aml_set_reg(dev, 0x00a0f5ec, country_pwr_limit_cfg.phy_maskfilter_cfg[filter_type].mask_bw_cfg[4]); //wf0 11b
+       }
+   }
 
     if (tx_pwr < limit_pwr) {
         limit_pwr = tx_pwr;
@@ -3756,7 +3640,7 @@ U8 aml_country_pwr_limit(U8 tx_pwr, int prot, U8 rate, U8 bw, U8 channel)
 }
 
 
-int aml_set_tx_prot(struct net_device *dev, int tx_pam, int tx_pam1)
+static int aml_set_tx_prot(struct net_device *dev, int tx_pam, int tx_pam1)
 {
     int model = (tx_pam & 0x00f00000) >> 20; //0x1 wf0 0x2 wf1 0x3 mimo
     int prot = (tx_pam & 0x000f0000) >> 16; //11b/11ag/ht/vht/hesu
@@ -3774,11 +3658,14 @@ int aml_set_tx_prot(struct net_device *dev, int tx_pam, int tx_pam1)
     S8 s_int_pwr = 0;
     S8 s_frac_pwr = 0;
 
-    if (country_pwr_limit_cfg.country_pwr_limit_en == 1) {
-        tx_pwr = aml_country_pwr_limit(tx_pwr, prot, rate, bw, channel);
+    if (regdom_en == 1)
+    {
+        tx_pwr = aml_country_pwr_limit(dev, tx_pwr, prot, rate, bw, channel);
     }
 
-    flag_bit = (tx_pwr & 0xff) >> 8;
+    AML_INFO("set_tx_prot_1:%d\n", tx_pwr);
+
+    flag_bit = (tx_pwr & 0xff) >> 7;
     if (flag_bit == 0) {
        u_int_pwr = tx_pwr / 4;
        u_frac_pwr = tx_pwr - u_int_pwr * 4;
@@ -3786,7 +3673,7 @@ int aml_set_tx_prot(struct net_device *dev, int tx_pam, int tx_pam1)
        s_tx_pwr = tx_pwr - 256;
        s_int_pwr = (s_tx_pwr - 3) / 4;
        s_frac_pwr = s_tx_pwr - s_int_pwr * 4;
-       u_int_pwr = s_tx_pwr + 256;
+       u_int_pwr = s_int_pwr + 256;
        u_frac_pwr = s_frac_pwr;
     }
     aml_set_reg(dev, 0x00a0e7f8, 0x00000000 | (u_frac_pwr << 4) | (1 & 0x0f));
@@ -3833,7 +3720,16 @@ int aml_set_tx_prot(struct net_device *dev, int tx_pam, int tx_pam1)
             }
             else
             {
-                aml_rf_reg_write(dev, 0x8000104c, 0x04800728);
+
+                if (g_rf_cfg_type == RF_TYPE_LOW_POWER)
+                {
+                    aml_rf_reg_write(dev, 0x8000104c, 0x04800528);
+                }
+                else
+                {
+                    aml_rf_reg_write(dev, 0x8000104c, 0x04800728);
+                }
+
             }
 
         }
@@ -3855,7 +3751,14 @@ int aml_set_tx_prot(struct net_device *dev, int tx_pam, int tx_pam1)
             }
             else
             {
-                aml_rf_reg_write(dev, 0x8000004c, 0x04800828);
+                if (g_rf_cfg_type == RF_TYPE_LOW_POWER)
+                {
+                    aml_rf_reg_write(dev, 0x8000004c, 0x04800528);
+                }
+                else
+                {
+                    aml_rf_reg_write(dev, 0x8000004c, 0x04800828);
+                }
             }
 
         }
@@ -3868,8 +3771,10 @@ int aml_set_tx_prot(struct net_device *dev, int tx_pam, int tx_pam1)
 
     if (model == 3)
     {
+
         aml_set_reg(dev,0x60c0b100, 0x00484848);
         aml_set_reg(dev,0x60c0b104, 0x00484848);
+
         if (channel > 14)
         {
             if (rf_cali_type == 1)  //special type
@@ -3879,14 +3784,22 @@ int aml_set_tx_prot(struct net_device *dev, int tx_pam, int tx_pam1)
             }
             else
             {
-                aml_rf_reg_write(dev, 0x8000004c, 0x04800628);
-                aml_rf_reg_write(dev, 0x8000104c, 0x04800528);
+                if (g_rf_cfg_type == RF_TYPE_LOW_POWER)
+                {
+                    aml_rf_reg_write(dev, 0x8000004c, 0x04800328);
+                    aml_rf_reg_write(dev, 0x8000104c, 0x04800428);
+                }
+                else
+                {
+                    aml_rf_reg_write(dev, 0x8000004c, 0x04800528);
+                    aml_rf_reg_write(dev, 0x8000104c, 0x04800528);
+                }
             }
         }
         else
         {
-            aml_rf_reg_write(dev, 0x8000004c, 0x04800228);  //modify for cmw500 mimo mode
-            aml_rf_reg_write(dev, 0x8000104c, 0x04800228);  //modify for cmw500 mimo mode
+            aml_rf_reg_write(dev, 0x8000004c, 0x04800328);  //modify for cmw500 mimo mode
+            aml_rf_reg_write(dev, 0x8000104c, 0x04800328);  //modify for cmw500 mimo mode
         }
     }
     else
@@ -3897,7 +3810,7 @@ int aml_set_tx_prot(struct net_device *dev, int tx_pam, int tx_pam1)
     return 0;
 }
 
-int aml_set_power_offset(struct net_device *dev,union iwreq_data *wrqu, char *extra, int pwr_offset)
+static int aml_set_power_offset(struct net_device *dev,union iwreq_data *wrqu, char *extra, int pwr_offset)
 {
     unsigned int offset = pwr_offset & 0x0000003f;
     unsigned int reference_pw;
@@ -3978,7 +3891,7 @@ int aml_set_ram_efuse(struct net_device *dev , unsigned int ram_efuse)
     return 0;
 }
 
-int aml_get_xosc_efuse_times(struct net_device *dev , union iwreq_data *wrqu, char *extra)
+static int aml_get_xosc_efuse_times(struct net_device *dev , union iwreq_data *wrqu, char *extra)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     unsigned int reg_val = 0;
@@ -3997,13 +3910,14 @@ int aml_get_xosc_efuse_times(struct net_device *dev , union iwreq_data *wrqu, ch
         times = 0;
     }
 
+    AML_INFO("aml_get_xosc_efuse_times reg_val:%d, reg_val_second:%d times:%d\n", reg_val, reg_val_second, times);
     wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "&0x%08x", times);
     wrqu->data.length++;
 
     return 0;
 }
 
-int aml_get_mac_efuse_times(struct net_device *dev , union iwreq_data *wrqu, char *extra)
+static int aml_get_mac_efuse_times(struct net_device *dev , union iwreq_data *wrqu, char *extra)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     unsigned int mac_val = 0;
@@ -4020,12 +3934,14 @@ int aml_get_mac_efuse_times(struct net_device *dev , union iwreq_data *wrqu, cha
         times = 0;
     }
 
+    AML_INFO("aml_get_mac_efuse_times mac_val:%d, mac_val_second:%d times:%d\n", mac_val, mac_val_second, times);
     wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "&0x%08x", times);
     wrqu->data.length++;
+
     return 0;
 }
 
-int aml_set_xosc_efuse(struct net_device *dev , int xosc_efuse)
+static int aml_set_xosc_efuse(struct net_device *dev , int xosc_efuse)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     unsigned int reg_val = 0;
@@ -4062,7 +3978,7 @@ int aml_set_xosc_efuse(struct net_device *dev , int xosc_efuse)
     return 0;
 }
 
-int aml_get_xosc_offset(struct net_device *dev,union iwreq_data *wrqu, char *extra)
+static int aml_get_xosc_offset(struct net_device *dev,union iwreq_data *wrqu, char *extra)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     unsigned int reg_val = 0;
@@ -4074,7 +3990,7 @@ int aml_get_xosc_offset(struct net_device *dev,union iwreq_data *wrqu, char *ext
 
     unsigned int aml_efuse_index_2[16] = {EFUSE_BASE_15, EFUSE_BASE_15, EFUSE_BASE_15, EFUSE_BASE_15, EFUSE_BASE_15, EFUSE_BASE_15,\
         EFUSE_BASE_16, EFUSE_BASE_16, EFUSE_BASE_16, EFUSE_BASE_16, EFUSE_BASE_16, EFUSE_BASE_17,\
-        EFUSE_BASE_17,EFUSE_BASE_17,EFUSE_BASE_17,EFUSE_BASE_17};;
+        EFUSE_BASE_17,EFUSE_BASE_17,EFUSE_BASE_17,EFUSE_BASE_17};
     unsigned int aml_efuse_mark_2[16] = {0, 5, 10, 16, 21, 26, 0, 5, 16, 21, 26, 0, 5, 10, 16, 21};
 
     U8 aml_efuse_area[16] = {0};
@@ -4142,7 +4058,7 @@ int aml_get_xosc_offset(struct net_device *dev,union iwreq_data *wrqu, char *ext
     return 0;
 }
 
-void aml_set_wifi_mac_addr(struct net_device *dev, char* arg_iw)
+static void aml_set_wifi_mac_addr(struct net_device *dev, char* arg_iw)
 {
     char **mac_cmd;
     int cmd_arg;
@@ -4202,7 +4118,7 @@ void aml_set_wifi_mac_addr(struct net_device *dev, char* arg_iw)
     }
 }
 
-int aml_get_wifi_mac_addr(struct net_device *dev,union iwreq_data *wrqu, char *extra)
+static int aml_get_wifi_mac_addr(struct net_device *dev,union iwreq_data *wrqu, char *extra)
 {
     unsigned int efuse_data_l = 0;
     unsigned int efuse_data_h = 0;
@@ -4241,7 +4157,7 @@ int aml_get_wifi_mac_addr(struct net_device *dev,union iwreq_data *wrqu, char *e
     return 0;
 }
 
-void aml_set_bt_mac_addr(struct net_device *dev, char* arg_iw)
+static void aml_set_bt_mac_addr(struct net_device *dev, char* arg_iw)
 {
     char **mac_cmd;
     int cmd_arg;
@@ -4302,12 +4218,11 @@ void aml_set_bt_mac_addr(struct net_device *dev, char* arg_iw)
     }
 }
 
-int aml_get_bt_mac_addr(struct net_device *dev,union iwreq_data *wrqu, char *extra)
+static int aml_get_bt_mac_addr(struct net_device *dev,union iwreq_data *wrqu, char *extra)
 {
     unsigned int efuse_data_l = 0;
     unsigned int efuse_data_h = 0;
     struct aml_vif *aml_vif = netdev_priv(dev);
-    unsigned int efuse_data = 0;
 
     efuse_data_l = _aml_get_efuse(aml_vif, EFUSE_BASE_11);
     efuse_data_h = _aml_get_efuse(aml_vif, EFUSE_BASE_12);
@@ -4424,12 +4339,11 @@ void aml_set_15p4_mac_addr(struct net_device *dev, char* arg_iw)
 
 }
 
-int aml_get_15p4_mac_addr(struct net_device *dev,union iwreq_data *wrqu, char *extra)
+static int aml_get_15p4_mac_addr(struct net_device *dev,union iwreq_data *wrqu, char *extra)
 {
     unsigned int efuse_data_l = 0;
     unsigned int efuse_data_h = 0;
     struct aml_vif *aml_vif = netdev_priv(dev);
-    unsigned int efuse_data = 0;
 
 #if 1
     efuse_data_l = _aml_get_efuse(aml_vif, EFUSE_BASE_13);
@@ -4463,7 +4377,7 @@ int aml_get_15p4_mac_addr(struct net_device *dev,union iwreq_data *wrqu, char *e
     return 0;
 }
 
-int aml_get_bt_digital_gain_efuse_times(struct net_device *dev , union iwreq_data *wrqu, char *extra)
+static int aml_get_bt_digital_gain_efuse_times(struct net_device *dev , union iwreq_data *wrqu, char *extra)
 {
     unsigned int reg_val = 0;
     unsigned int times = 0;
@@ -4486,7 +4400,7 @@ int aml_get_bt_digital_gain_efuse_times(struct net_device *dev , union iwreq_dat
     return times;
 }
 
-int aml_set_bt_digital_gain_efuse(struct net_device *dev, unsigned char bdr_gain, unsigned char edr_gain)
+static int aml_set_bt_digital_gain_efuse(struct net_device *dev, unsigned char bdr_gain, unsigned char edr_gain)
 {
     unsigned int efuse_data = 0;
     struct aml_vif *aml_vif = netdev_priv(dev);
@@ -4497,23 +4411,23 @@ int aml_set_bt_digital_gain_efuse(struct net_device *dev, unsigned char bdr_gain
         return -1;
     }
 
+    _aml_set_efuse(aml_vif, EFUSE_BASE_0D, BIT(7));
     efuse_data = ((edr_gain << 8) | bdr_gain);
     _aml_set_efuse(aml_vif, EFUSE_BASE_1A, efuse_data);
-    _aml_set_efuse(aml_vif, EFUSE_BASE_0D, BIT(7));
     AML_INFO("aml_set_bt_digital_gain_efuse:0x%8x\n", efuse_data);
 
     return 0;
 }
 
-int aml_get_bt_digital_gain_efuse(struct net_device *dev , union iwreq_data *wrqu, char *extra)
+static int aml_get_bt_digital_gain_efuse(struct net_device *dev , union iwreq_data *wrqu, char *extra)
 {
     unsigned int efuse_data = 0;
     struct aml_vif *aml_vif = netdev_priv(dev);
 
     efuse_data = _aml_get_efuse(aml_vif, EFUSE_BASE_1A);
 
-    extra[0] = (efuse_data & 0x000000ff);
-    extra[1] = (efuse_data & 0x0000ff00) >> 8;
+    extra[0] = (efuse_data & 0xff);
+    extra[1] = (efuse_data >> 8) & 0xff;
 
     AML_INFO("aml_get_bt_pwr_vid efuse_data:%08x, return result: %02x:%02x\n", efuse_data, extra[0], extra[1]);
 
@@ -4523,7 +4437,63 @@ int aml_get_bt_digital_gain_efuse(struct net_device *dev , union iwreq_data *wrq
     return 0;
 }
 
-int aml_get_all_efuse(struct net_device *dev,union iwreq_data *wrqu, char *extra)
+static int aml_get_br_gain_idx_req(struct net_device *dev , union iwreq_data *wrqu, char *extra)
+{
+    unsigned int efuse_data = 0;
+    struct aml_vif *aml_vif = netdev_priv(dev);
+
+    efuse_data = _aml_get_efuse(aml_vif, EFUSE_BASE_0B);
+
+    extra[0] = (efuse_data >> 6) & 0x3;
+
+    AML_INFO("aml_get_br_gain_idx_req efuse_data:%08x, return result: %02x\n", efuse_data, extra[0]);
+
+    wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "br_gain_idx:%02x", extra[0]);
+    wrqu->data.length++;
+
+    return 0;
+}
+
+static int aml_set_br_gain_idx_req(struct net_device *dev, unsigned char br_gain_idx)
+{
+    unsigned int efuse_data = 0;
+    struct aml_vif *aml_vif = netdev_priv(dev);
+
+    if (br_gain_idx > 3) {
+        AML_INFO("aml_set_br_gain_idx_req exit br_gain_idx:%d\n", br_gain_idx);
+        return -1;
+    }
+
+    efuse_data = _aml_get_efuse(aml_vif, EFUSE_BASE_0B);
+    if ((efuse_data & 0xc0) != 0) {
+        AML_INFO("aml_set_br_gain_idx_req exist:%04x\n", (efuse_data & 0xc0));
+        return -1;
+    }
+
+    efuse_data |= (br_gain_idx << 6);
+    _aml_set_efuse(aml_vif, EFUSE_BASE_0B, efuse_data);
+    AML_INFO("aml_set_bt_digital_gain_efuse:0x%8x\n", efuse_data);
+
+    return 0;
+}
+
+static int aml_set_rx_bw_nss(struct net_device *dev, unsigned char bw, unsigned char nss)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    if (bw > 2) {
+        AML_INFO("Invalid value, Bw[%d] must be 0-2, 0:20M, 1:40M, 2:80M \n", bw);
+        return -1;
+    }
+    if (nss > 1) {
+        AML_INFO("Invalid value, nss[%d] must be 0 or 1, 0:1nss, 1:2nss \n", nss);
+        return -1;
+    }
+
+    _aml_set_rx_bw_nss(aml_vif, bw, nss);
+    return 0;
+}
+
+static int aml_get_all_efuse(struct net_device *dev,union iwreq_data *wrqu, char *extra)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     unsigned int reg_val = 0;
@@ -4550,10 +4520,8 @@ int aml_get_all_efuse(struct net_device *dev,union iwreq_data *wrqu, char *extra
     unsigned int wifi_efuse_data = 0;
     unsigned int bt_efuse_data_l = 0;
     unsigned int bt_efuse_data_h = 0;
-    unsigned int bt_efuse_data = 0;
     unsigned int p154_efuse_data_l = 0;
     unsigned int p154_efuse_data_h = 0;
-    unsigned int p154_efuse_data = 0;
     unsigned int i = 0;
 
     reg_val = _aml_get_efuse(aml_vif, EFUSE_BASE_00);
@@ -4646,7 +4614,7 @@ int aml_get_all_efuse(struct net_device *dev,union iwreq_data *wrqu, char *extra
         p154_efuse_data_h = _aml_get_efuse(aml_vif, EFUSE_BASE_05);
     }
     if (p154_efuse_data_l != 0 || p154_efuse_data_h != 0) {
-        AML_INFO(" 15p4 MAC addr is: %02x:%02x:%02x:%02x:%02x:%02x:0x2x:0x2x\n",
+        AML_INFO(" 15p4 MAC addr is: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x\n",
             (p154_efuse_data_h & 0xff000000) >> 24,(p154_efuse_data_h & 0x00ff0000) >> 16,
             (p154_efuse_data_h & 0xff00) >> 8, p154_efuse_data_h & 0xff,
             (p154_efuse_data_l & 0xff000000) >> 24, (p154_efuse_data_l & 0x00ff0000) >> 16,
@@ -4675,9 +4643,10 @@ int aml_get_all_efuse(struct net_device *dev,union iwreq_data *wrqu, char *extra
         (p154_efuse_data_l & 0xff000000) >> 24, (p154_efuse_data_l & 0x00ff0000) >> 16,
         (p154_efuse_data_l & 0xff00) >> 8, p154_efuse_data_l & 0xff);
     wrqu->data.length++;
+    return 0;
 }
 
-int aml_set_offset_power_vld(struct net_device *dev)
+static int aml_set_offset_power_vld(struct net_device *dev)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     unsigned int reg_val = 0;
@@ -4709,7 +4678,7 @@ int aml_set_offset_power_vld(struct net_device *dev)
 }
 
 extern unsigned char g_fw_recovery_flag;
-int aml_set_tx_end(struct net_device *dev, union iwreq_data *wrqu, char *extra)
+static int aml_set_tx_end(struct net_device *dev, union iwreq_data *wrqu, char *extra)
 {
     unsigned char err_msg[] = " FW-error";
     struct aml_vif *aml_vif = netdev_priv(dev);
@@ -4758,70 +4727,65 @@ int aml_set_second_offset_power_vld(struct net_device *dev)
     reg_val = _aml_get_efuse(aml_vif, EFUSE_BASE_18);
     reg_val = reg_val | 0xc0000000;
     _aml_set_efuse(aml_vif, EFUSE_BASE_18, reg_val);
-
+    return 0;
 }
 
-int aml_set_recovery(struct net_device *dev, int recy_id)
+#ifdef CONFIG_AML_RECOVERY
+static int aml_set_recovery(struct net_device *dev, int recy_id)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
-#ifdef CONFIG_AML_RECOVERY
     struct aml_hw *aml_hw = aml_vif->aml_hw;
-    struct aml_cmd_mgr *cmd_mgr = &aml_hw->cmd_mgr;
-#endif
 
     switch (recy_id) {
-#ifdef CONFIG_AML_RECOVERY
         case 0:
             AML_INFO("disable recovery detection");
-
-            if (aml_bus_type == USB_MODE)
-                aml_fw_reset(aml_hw, 0);
-            else
+            if (aml_recy->host_recy)
                 aml_recy_disable();
-
+            else
+                aml_fw_reset(aml_hw, 0);
             break;
         case 1:
             AML_INFO("enable recovery detection");
-
-            if (aml_bus_type == USB_MODE)
-                aml_fw_reset(aml_hw, 1);
+            if (aml_recy->host_recy)
+                aml_recy_enable(aml_hw);
             else
-                aml_recy_enable();
-
+                aml_fw_reset(aml_hw, 1);
             break;
         case 2:
             AML_INFO("do simulate cmd queue crashed");
-            spin_lock_bh(&cmd_mgr->lock);
-            cmd_mgr->state = AML_CMD_MGR_STATE_CRASHED;
-            spin_unlock_bh(&cmd_mgr->lock);
+            aml_recy->recy_test.cmd_timeout_test = 1;
+            aml_send_sync_trace(aml_hw);
             break;
         case 3:
-            AML_INFO("do recovery straightforward");
-            aml_recy_doit(aml_hw);
+            AML_INFO("do simulate bus timeout");
+            aml_set_bus_timeout_test(dev, 1);
+            break;
+        case 4:
+            AML_INFO("do firmware assert_rec");
+            aml_fw_reset(aml_hw, 4);
             break;
         case 5:
             AML_INFO("do simulate link loss recovery");
+            aml_recy->recy_test.link_loss_test = 1;
             aml_recy_link_loss_test();
             break;
-#endif
-        case 4:
-            AML_INFO("do firmware soft reset");
-            aml_fw_reset(aml_hw, 4);
-            break;
-
         case 6:
-            AML_INFO("do usb reset");
+            AML_INFO("fw assert");
             aml_fw_reset(aml_hw, 6);
             break;
-
+        case 7:
+            AML_INFO("fw exception");
+            aml_fw_reset(aml_hw, 7);
+            break;
         default:
             AML_INFO("unknown recovery operation");
             break;
     }
     return 0;
 }
+#endif
 
-int aml_set_tx_path(struct net_device *dev, int path, int channel)
+static int aml_set_tx_path(struct net_device *dev, int path, int channel)
 {
     unsigned int reg_val = 0;
 
@@ -4877,7 +4841,7 @@ int aml_set_tx_path(struct net_device *dev, int path, int channel)
     return 0;
 }
 
-int aml_fix_tx_power(struct net_device *dev, int pwr)
+static int aml_fix_tx_power(struct net_device *dev, int pwr)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
 
@@ -4888,7 +4852,7 @@ int aml_fix_tx_power(struct net_device *dev, int pwr)
     return 0;
 }
 
-int aml_emb_la_capture(struct net_device *dev, int bus1, int bus2)
+static int aml_emb_la_capture(struct net_device *dev, int bus1, int bus2)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
 
@@ -4906,32 +4870,38 @@ int aml_emb_la_enable(struct net_device *dev, int enable)
     struct aml_hw *aml_hw = aml_vif->aml_hw;
 
     if (aml_bus_type == PCIE_MODE) {
-        printk("invalid cmd\n");
+        AML_ERR("invalid cmd\n");
         return -1;
     }
 
     if (enable != 0 && enable != 1) {
-        AML_INFO("param error:%d\n",  enable);
+        AML_ERR("param error:%d\n",  enable);
         return -1;
     }
 
     if (enable == aml_hw->la_enable) {
-        AML_INFO("The set la status is consistent with the current la status, Do nothing!");
+        AML_ERR("The set la status is consistent with the current la status, Do nothing!");
         return -1;
     }
 
-    if (aml_hw->rx_buf_state & BUFFER_STATUS) {
-        AML_INFO("During dynamic buf switch, please try again later");
+    if (aml_hw->rx.fw.state & FW_BUFFER_STATUS) {
+        AML_ERR("During dynamic buf switch, please try again later");
         return -1;
     }
 
+#ifdef CONFIG_AML_LA
     _aml_set_la_enable(aml_hw, enable);
     aml_hw->la_enable = enable;
+    aml_shared_mem_layout_update(&aml_hw->rx);
 
     return 0;
+#else
+    AML_INFO("CONFIG_AML_LA is not enabled!\n");
+    return -1;
+#endif
 }
 
-int aml_set_usb_trace_enable(struct net_device *dev, int enable)
+static int aml_set_usb_trace_enable(struct net_device *dev, int enable)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
@@ -4956,7 +4926,7 @@ int aml_set_usb_trace_enable(struct net_device *dev, int enable)
         return -1;
     }
 
-    if (aml_hw->rx_buf_state & BUFFER_STATUS) {
+    if (aml_hw->rx.fw.state & FW_BUFFER_STATUS) {
         AML_INFO("During dynamic buf switch, please try again later");
         return -1;
     }
@@ -4968,34 +4938,12 @@ int aml_set_usb_trace_enable(struct net_device *dev, int enable)
 
     _aml_set_usb_trace_enable(aml_hw, enable);
     aml_hw->trace_enable = enable;
+    aml_shared_mem_layout_update(&aml_hw->rx);
 
     return 0;
 }
 
-extern struct aml_dyn_snr_cfg g_dyn_snr;
-static int aml_dyn_snr_cfg(struct net_device *dev, int enable, int mcs_ration)
-{
-    struct aml_vif *aml_vif = netdev_priv(dev);
-    struct aml_hw *aml_hw = aml_vif->aml_hw;
-    u32 snr_cfg = 0;
-
-    if (enable)
-    {
-        g_dyn_snr.enable = enable;
-        g_dyn_snr.snr_mcs_ration = mcs_ration;
-    }
-    else
-    {
-        g_dyn_snr.enable = enable;
-
-        snr_cfg = AML_REG_READ(aml_hw->plat, AML_ADDR_SYSTEM, 0xc00828);
-        snr_cfg &= ~ (BIT(29)|BIT(30));
-        AML_REG_WRITE(snr_cfg, aml_hw->plat, AML_ADDR_SYSTEM, 0xc00828);
-    }
-    return 0;
-}
-
-int aml_set_tx_mode(struct net_device *dev, int mode)
+static int aml_set_tx_mode(struct net_device *dev, int mode)
 {
     tx_mode = mode;
 
@@ -5010,7 +4958,7 @@ int aml_set_tx_mode(struct net_device *dev, int mode)
     return 0;
 }
 
-int aml_set_tx_bw(struct net_device *dev, int bw)
+static int aml_set_tx_bw(struct net_device *dev, int bw)
 {
     tx_bw = bw;
 
@@ -5021,7 +4969,7 @@ int aml_set_tx_bw(struct net_device *dev, int bw)
     return 0;
 }
 
-int aml_set_tx_rate(struct net_device *dev, int rate)
+static int aml_set_tx_rate(struct net_device *dev, int rate)
 {
     tx_rate = rate;
     tx_rate = tx_rate & 0x000000ff;
@@ -5031,7 +4979,7 @@ int aml_set_tx_rate(struct net_device *dev, int rate)
     return 0;
 }
 
-int aml_set_tx_len(struct net_device *dev, int len)
+static int aml_set_tx_len(struct net_device *dev, int len)
 {
     if (len > 0xfffff) {
         AML_ERR("set_tx_len error:%d\n", len);
@@ -5046,9 +4994,10 @@ int aml_set_tx_len(struct net_device *dev, int len)
     return 0;
 }
 
-int aml_set_tx_pwr(struct net_device *dev, int pwr)
+static int aml_set_tx_pwr(struct net_device *dev, int pwr)
 {
     tx_pwr = pwr;
+    tx_pwr = tx_pwr & 0x000000ff;
 
     if (tx_pwr > 0xff) {
         AML_ERR("set_tx_pwr error :%d\n", tx_pwr);
@@ -5061,7 +5010,7 @@ int aml_set_tx_pwr(struct net_device *dev, int pwr)
     return 0;
 }
 
-int aml_set_olpc_pwr(struct net_device *dev,int tx_param1)
+static int aml_set_olpc_pwr(struct net_device *dev,int tx_param1)
 {
     int tx_pwr = tx_param1 & 0x000000ff;
     aml_set_reg(dev, MACBYP_TXV_ADDR + MACBYP_TXV_08, tx_pwr); //bit[7:0] : txv1_txpwr_level_idx
@@ -5069,7 +5018,7 @@ int aml_set_olpc_pwr(struct net_device *dev,int tx_param1)
     return 0;
 }
 
-int aml_set_xosc_ctune(struct net_device *dev,union iwreq_data *wrqu, char *extra, int xosc_param)
+static int aml_set_xosc_ctune(struct net_device *dev,union iwreq_data *wrqu, char *extra, int xosc_param)
 {
     unsigned int xosc = aml_get_reg_2(dev, XOSC_CTUNE_BASE, wrqu, extra);
     xosc = xosc & 0xfffff00f;
@@ -5086,9 +5035,9 @@ int aml_set_xosc_ctune(struct net_device *dev,union iwreq_data *wrqu, char *extr
     return 0;
 }
 
-int aml_set_tx_frame_delay(struct net_device *dev, int frame_delay)
+static __always_unused int aml_set_tx_frame_delay(struct net_device *dev, int frame_delay)
 {
-    aml_set_reg(dev, 0x60c06048, frame_delay);
+    return aml_set_reg(dev, 0x60c06048, frame_delay);
 }
 
 static int aml_pcie_lp_switch(struct net_device *dev, int status)
@@ -5118,7 +5067,7 @@ static int aml_pcie_lp_switch(struct net_device *dev, int status)
         return 0;
     }
     if (ret) {
-        ERROR_DEBUG_OUT("pci_set_power_state error %d\n", ret);
+        AML_ERR("pci_set_power_state error %d\n", ret);
     }
     return ret;
 }
@@ -5130,8 +5079,7 @@ int aml_set_fwlog_cmd(struct net_device *dev, int mode)
     struct aml_hw *aml_hw = aml_vif->aml_hw;
     int ret = 0;
 
-    if (aml_bus_type != PCIE_MODE && g_trace_nl_info.enable && trace_log_file_info.log_buf
-        && trace_log_file_info.ptr && trace_log_file_info.fail_buf) {
+    if (aml_bus_type != PCIE_MODE) {
         trace_flag = mode;
         if (mode == 0) {
             aml_hw->trace_bit_flag &= ~TRACE_ENABLE_BIT_FLAG;
@@ -5148,6 +5096,12 @@ int aml_set_fwlog_cmd(struct net_device *dev, int mode)
         AML_ERR("bus_type err or trace_log_file_info init failed!\n");
     }
     return 0;
+}
+
+static void aml_close_netlink_socket(struct net_device *dev)
+{
+    AML_INFO("close netlink socket in user space\n");
+    aml_send_log_to_user(NULL, 0, AML_CLOSE_NETLINK_SOCKET);
 }
 
 static int aml_iwpriv_set_mcc_ratio(struct net_device *dev, int ratio)
@@ -5177,7 +5131,11 @@ int aml_is_valid_mac_addr(const char* mac, int byte_length)
                 return -1;
             }
         } else {
-            if ((('0' <= mac[i]) && (mac[i] <= '9')) || (('a' <= mac[i]) && (mac[i] <= 'f'))) {
+            if ((('0' <= mac[i]) && (mac[i] <= '9')) || (('a' <= mac[i]) && (mac[i] <= 'f'))
+                #ifdef CONFIG_AML_NAN_SUPPORT
+                || (('A' <= mac[i]) && (mac[i] <= 'F'))
+                #endif
+                ) {
                 ;
             } else {
                 AML_ERR("mac invalid!\n");
@@ -5202,7 +5160,7 @@ static int aml_set_tcp_tcp_ack_window_scaling(struct net_device *dev, int win_sc
     return 0;
 }
 
-void aml_set_efuse_vendor_sn(struct net_device *dev, char *arg)
+static void aml_set_efuse_vendor_sn(struct net_device *dev, char *arg)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     char **argv;
@@ -5262,6 +5220,15 @@ int aml_iwpriv_set_rts_based_txop(struct net_device *dev, int enable)
     return 0;
 }
 
+int aml_iwpriv_set_wmm_ie(struct net_device *dev, int enable)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+
+    aml_set_wmm_ie(aml_vif, enable);
+
+    return 0;
+}
+
 int aml_iwpriv_set_agg_tx_cnt_thres(struct net_device *dev, int enable)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
@@ -5299,7 +5266,7 @@ void aml_datarate_monitor(void)
         start_flag = 0;
         payload_total = 0;
         g_test_times--;
-        AML_ERR(">>>interface_speed :%d mbps, time:%d\n", sdio_speed, (jiffies - in_time));
+        AML_ERR(">>>interface_speed :%d mbps, time:%ld\n", sdio_speed, (jiffies - in_time));
     }
 }
 
@@ -5407,7 +5374,7 @@ int aml_sdio_max_speed_test_cmd(struct net_device *dev, int enable)
 }
 #endif
 
-int aml_usb_max_speed_test_cmd(struct net_device *dev, int enable, int data_len)
+static int aml_usb_max_speed_test_cmd(struct net_device *dev, int enable, int data_len)
 {
     struct aml_vif *aml_vif = netdev_priv(dev);
     struct aml_hw *aml_hw = aml_vif->aml_hw;
@@ -5420,6 +5387,7 @@ int aml_usb_max_speed_test_cmd(struct net_device *dev, int enable, int data_len)
 
     if (data_len > 800 * 1024) {
         AML_ERR("test data len too long data_len:%d\n", data_len);
+        kfree(usb_test_buf);
         return 1;
     }
 
@@ -5448,6 +5416,154 @@ int aml_usb_max_speed_test_cmd(struct net_device *dev, int enable, int data_len)
         AML_INFO("usb rx speed testing end, times:%d, data_len:%d\n", g_test_times, data_len);
     }
 
+    kfree(usb_test_buf);
+    return 0;
+}
+
+static int aml_send_action_req(struct net_device *dev, int type)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+
+    aml_send_action(aml_vif, type);
+
+    return 0;
+}
+#ifdef CONFIG_AML_APF
+int aml_get_apf_capa(struct net_device *dev)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+
+    aml_apf_get_capabilities(aml_hw);
+    aml_hw->apf_params.apf_cap.apf_mem_addr |= DCCM_RAM_ADDR;
+    AML_INFO("apf_version: %d, apf_max_len %d apf_program_buf addr:0x%x\n",
+         aml_hw->apf_params.apf_cap.version, aml_hw->apf_params.apf_cap.max_len, aml_hw->apf_params.apf_cap.apf_mem_addr);
+    return 0;
+}
+
+int aml_iwpriv_get_apf_status(struct net_device *dev)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    aml_apf_get_status(aml_hw);
+    AML_INFO("APF_STATUS:%d\n APF_filter_age_16384ths %u\n",
+        aml_hw->apf_params.apf_info.apf_status,aml_hw->apf_params.apf_info.filter_age_16384ths);
+    return 0;
+}
+
+uint8_t apf_macaddr3;
+uint8_t apf_macaddr4;
+uint8_t apf_macaddr5;
+int aml_add_apf_filter_program(struct net_device *dev, int ip)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    uint8_t ipaddr = (uint8_t)ip;
+    uint8_t ipaddr3 = 1; // 192.168.1.x
+    apf_macaddr3 = 0x6b;
+    apf_macaddr4 = 0x9f;
+    apf_macaddr5 = 0xfa;
+    uint8_t apf_program[] = {
+#if 0 // ARP offload program Test
+        0x75, 0x00, 0x10, 0x1c, 0xa4, 0x10, apf_macaddr3, apf_macaddr4, apf_macaddr5, 0x08, 0x06, 0x00, 0x01, 0x08, 0x00, 0x06,
+        0x04, 0x00, 0x02, 0xAA, 0x30, 0x0E, 0x3C, 0xAA, 0x0F, 0xBA, 0x06, 0xAA, 0x09, 0xBA, 0x07, 0xAA,
+        0x08, 0xBA, 0x08, 0x6A, 0x01, 0xBA, 0x09, 0x12, 0x0C, 0x84, 0x00, 0x6F, 0x08, 0x06, 0x6A, 0x0E,
+        0xA3, 0x02, 0x06, 0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x03, 0x2B, 0x12, 0x14, 0x7A, 0x27, 0x01,
+        0x7A, 0x02, 0x02, 0x03, 0x30, 0x1A, 0x1C, 0x82, 0x02, 0x00, 0x03, 0x2D, 0x68, 0xA3, 0x02, 0x06,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0x0E, 0x1A, 0x26, 0x7E, 0x00, 0x00, 0x00, 0x02, 0xC0,
+        0xA8, 0x32, ipaddr, 0x03, 0x2C, 0x02, 0x0B, 0x1A, 0x26, 0x7E, 0x00, 0x00, 0x00, 0x02, 0xC0, 0xA8,
+        0x32, ipaddr, 0x03, 0x2C, 0xAB, 0x24, 0x00, 0x3C, 0xCA, 0x06, 0x06, 0xCB, 0x03, 0x06, 0xCB, 0x09,
+        0x0A, 0xCB, 0x03, 0x06, 0xC6, 0xC0, 0xA8, 0x32, ipaddr, 0xCA, 0x06, 0x06, 0xCA, 0x1C, 0x04, 0xAA,
+        0x0A, 0x3A, 0x12, 0xAA, 0x1A, 0xAA, 0x25, 0xFF, 0xFF, 0x03, 0x2F, 0x02, 0x0D, 0x12, 0x0C, 0x84,
+        0x00, 0x17, 0x08, 0x00, 0x0A, 0x17, 0x82, 0x10, 0x06, 0x12, 0x14, 0x9C, 0x00, 0x09, 0x1F, 0xFF,
+        0xAB, 0x0D, 0x2A, 0x10, 0x82, 0x02, 0x07, 0x03, 0x2A, 0x02, 0x11, 0x7C, 0x00, 0x0E, 0x86, 0xDD,
+        0x68, 0xA3, 0x02, 0x06, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0x16, 0x03, 0x19, 0x0A, 0x14,
+        0x82, 0x02, 0x00, 0x02, 0x18, 0x7A, 0x02, 0x3A, 0x02, 0x12, 0x0A, 0x36, 0x82, 0x02, 0x85, 0x03,
+        0x1F, 0x82, 0x16, 0x88, 0x6A, 0x26, 0xA2, 0x02, 0x0F, 0xFF, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x03, 0x20, 0x02, 0x14
+#else // imcpv4 offload program Test
+        0x75, 0x00, 0x10, 0x10, 0xa5, 0x62, apf_macaddr3, apf_macaddr4, apf_macaddr5, 0x08, 0x06, 0x00, 0x01, 0x08, 0x00, 0x06,
+        0x04, 0x00, 0x02, 0xAA, 0x30, 0x0C, 0x32, 0xAA, 0x0F, 0xBA, 0x06, 0xAA, 0x09, 0xBA, 0x07, 0xAA,
+        0x08, 0xBA, 0x08, 0x6A, 0x02, 0xBA, 0x09, 0x6A, 0x06, 0xA2, 0x02, 0x06, 0x10, 0xa5, 0x62, apf_macaddr3,
+        apf_macaddr4, apf_macaddr5, 0x03, 0x1A, 0x12, 0x0C, 0xAA, 0x2F, 0x02, 0x1A, 0x88, 0x8E, 0x08, 0x00, 0x88, 0xB4,
+        0x86, 0xDD, 0x08, 0x06, 0x03, 0x30, 0x84, 0x00, 0x6F, 0x08, 0x06, 0x6A, 0x0E, 0xA3, 0x02, 0x06,
+        0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x03, 0x36, 0x12, 0x14, 0x7A, 0x27, 0x01, 0x7A, 0x02, 0x02,
+        0x03, 0x3A, 0x1A, 0x1C, 0x82, 0x02, 0x00, 0x03, 0x38, 0x68, 0xA3, 0x02, 0x06, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0x02, 0x0C, 0x1A, 0x26, 0x7E, 0x00, 0x00, 0x00, 0x02, 0xc0, 0xa8, ipaddr3, ipaddr,
+        0x03, 0x37, 0x02, 0x0A, 0x1A, 0x26, 0x7E, 0x00, 0x00, 0x00, 0x02, 0xc0, 0xa8, ipaddr3, ipaddr, 0x03,
+        0x37, 0xAB, 0x24, 0x00, 0x3C, 0xCA, 0x06, 0x06, 0xCB, 0x03, 0x06, 0xCB, 0x09, 0x0A, 0xCB, 0x03,
+        0x06, 0xC6, 0xc0, 0xa8, ipaddr3, ipaddr, 0xCA, 0x06, 0x06, 0xCA, 0x1C, 0x04, 0xAA, 0x0A, 0x3A, 0x12,
+        0xAA, 0x1A, 0xAA, 0x25, 0xFF, 0xFF, 0x03, 0x39, 0x02, 0x0B, 0x12, 0x0C, 0x84, 0x00, 0xC6, 0x08,
+        0x00, 0x1A, 0x14, 0x56, 0x3F, 0xFF, 0x00, 0xFF, 0x82, 0x15, 0x11, 0xAB, 0x0D, 0x2A, 0x10, 0x82,
+        0x0E, 0x44, 0x6A, 0x32, 0x38, 0xA2, 0x02, 0x06, 0x10, 0xa5, 0x62, apf_macaddr3, apf_macaddr4, apf_macaddr5, 0x02, 0x0D,
+        0x0A, 0x1E, 0x52, 0xF0, 0x82, 0x02, 0xE0, 0x03, 0x20, 0x1A, 0x1E, 0x86, 0x00, 0x00, 0x00, 0x02,
+        0xFF, 0xFF, 0xFF, 0xFF, 0x03, 0x1D, 0x86, 0x00, 0x00, 0x00, 0x02, 0x0A, 0x00, 0x00, 0xFF, 0x03,
+        0x1E, 0x0A, 0x17, 0x82, 0x10, 0x06, 0x12, 0x14, 0x9C, 0x00, 0x09, 0x1F, 0xFF, 0xAB, 0x0D, 0x2A,
+        0x10, 0x82, 0x02, 0x07, 0x03, 0x35, 0x1A, 0x14, 0x56, 0x3F, 0xFF, 0x00, 0xFF, 0x82, 0x57, 0x01,
+        0x68, 0xA2, 0x4D, 0x06, 0x10, 0xa5, 0x62, apf_macaddr3, apf_macaddr4, apf_macaddr5, 0x6A, 0x1E, 0xA2, 0x44, 0x04, 0xc0,
+        0xa8, ipaddr3, ipaddr, 0xAA, 0x0D, 0x82, 0x3F, 0x14, 0xAA, 0x0E, 0x8A, 0x02, 0x29, 0x03, 0x1F, 0x0A,
+        0x22, 0x82, 0x33, 0x08, 0xAA, 0x0E, 0xAA, 0x24, 0xCA, 0x06, 0x06, 0xCB, 0x03, 0x06, 0xCA, 0x0C,
+        0x0A, 0xC6, 0x40, 0x01, 0x00, 0x00, 0xC6, 0xc0, 0xa8, ipaddr3, ipaddr, 0xCA, 0x1A, 0x04, 0xC6, 0x00,
+        0x00, 0x00, 0x00, 0x3E, 0xFF, 0xFF, 0xFF, 0xDA, 0x6B, 0x26, 0xAA, 0x22, 0xAA, 0x2A, 0xAA, 0x25,
+        0x0E, 0x24, 0x22, 0x00, 0x00, 0x03, 0x22, 0x68, 0xA3, 0x02, 0x06, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0x02, 0x11, 0x03, 0x1C, 0x02, 0x0F, 0x7C, 0x00, 0x0E, 0x86, 0xDD, 0x68, 0xA3, 0x02, 0x06,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0x16, 0x03, 0x19, 0x0A, 0x14, 0x82, 0x02, 0x00, 0x02,
+        0x12, 0x7A, 0x09, 0x3A, 0x0A, 0x26, 0x82, 0x02, 0xFF, 0x03, 0x2B, 0x02, 0x15, 0x0A, 0x36, 0x82,
+        0xFC, 0x87, 0x68, 0xA5, 0x00, 0x02, 0x28, 0x06, 0x33, 0x33, 0x00, 0x00, 0x00, 0x01, 0x33, 0x33,
+        0xFF, 0x44, 0x11, 0x22, 0x33, 0x33, 0xFF, 0x55, 0x66, 0x77, 0x33, 0x33, 0xFF, 0xBB, 0xCC, 0xDD,
+        0x10, 0xa5, 0x62, apf_macaddr3, apf_macaddr4, apf_macaddr5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x03, 0x2D, 0x6A, 0x26,
+        0xA2, 0x0C, 0x0D, 0xFF, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xFF,
+        0x3A, 0x0D, 0xA3, 0x02, 0x03, 0xBB, 0xCC, 0xDD, 0x03, 0x2D, 0x72, 0x15, 0xA3, 0x02, 0x10, 0x20,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x1B, 0xAA, 0xBB, 0xCC, 0xDD, 0x03,
+        0x2D, 0x0A, 0x15, 0x7A, 0x02, 0xFF, 0x03, 0x2C, 0x12, 0x12, 0x8A, 0x02, 0x17, 0x03, 0x2C, 0x0A,
+        0x37, 0x7A, 0x02, 0x00, 0x03, 0x2C, 0x6A, 0x3E, 0xA3, 0x02, 0x10, 0x20, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x1B, 0xAA, 0xBB, 0xCC, 0xDD, 0x03, 0x2D, 0x6A, 0x16, 0xA2,
+        0x02, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x02, 0x13, 0x12, 0x12, 0x8A, 0x02, 0x1F, 0x02, 0x13, 0x0A, 0x4E, 0x7A, 0x02, 0x01,
+        0x02, 0x13, 0x0A, 0x16, 0xAA, 0x2F, 0x02, 0x01, 0x00, 0xFF, 0x03, 0x2C, 0x0A, 0x50, 0x9A, 0x02,
+        0x01, 0x72, 0x02, 0x03, 0x2C, 0xAB, 0x24, 0x00, 0x56, 0xCA, 0x50, 0x06, 0xCB, 0x03, 0x06, 0xC4,
+        0x86, 0xDD, 0xC6, 0x60, 0x00, 0x00, 0x00, 0xC6, 0x00, 0x20, 0x3A, 0xFF, 0xCA, 0x3E, 0x10, 0xCA,
+        0x16, 0x10, 0xC6, 0x88, 0x00, 0x00, 0x20, 0xC6, 0xE0, 0x00, 0x00, 0x00, 0xCA, 0x3E, 0x10, 0xC4,
+        0x02, 0x01, 0xCB, 0x03, 0x06, 0xAA, 0x25, 0x0E, 0x38, 0x16, 0x00, 0x3A, 0x03, 0x2E, 0x82, 0x02,
+        0x85, 0x03, 0x25, 0x82, 0x16, 0x88, 0x6A, 0x26, 0xA2, 0x02, 0x0F, 0xFF, 0x02, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x2A, 0x02, 0x13
+#endif
+    };
+
+    AML_INFO("apf program len %d mac addr 1c:a4:10:%x:%x:%x ip 192.168.%d.%d\n", sizeof(apf_program),
+apf_macaddr3,apf_macaddr4, apf_macaddr5, ipaddr3,ipaddr);
+
+    aml_apf_add_filter(aml_hw, apf_program, sizeof(apf_program));
+    aml_hw->apf_params.apf_set = 1;
+
+    return 0;
+}
+
+int aml_del_apf_filter_program(struct net_device *dev)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    AML_FN_ENTRY();
+
+    //aml_apf_delete_filter(aml_hw);
+    aml_hw->apf_params.apf_set = 0;
+
+    AML_FN_EXIT();
+    return 0;
+}
+#endif //end CONFIG_AML_APF
+
+int aml_set_regdom_en(struct net_device *dev, int reg_en)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw * aml_hw = aml_vif->aml_hw;
+
+    AML_INFO("reg_en: 0x%08x\n", reg_en);
+
+    regdom_en = reg_en;
+    aml_regdom_en(aml_hw, reg_en);
+    aml_send_me_chan_config_req(aml_hw);
+
     return 0;
 }
 
@@ -5459,7 +5575,7 @@ static int aml_iwpriv_send_para1(struct net_device *dev,
     int sub_cmd = param[0];
     int set1 = param[1];
 
-    AML_INFO(" cmd:%d set1:%d\n", sub_cmd, set1);
+    AML_INFO("cmd:%d set1:%d\n", sub_cmd, set1);
 
     switch (sub_cmd) {
         case AML_IWP_SET_RATE_LEGACY_OFDM:
@@ -5491,6 +5607,9 @@ static int aml_iwpriv_send_para1(struct net_device *dev,
              break;
         case AML_IWP_SET_STBC:
             aml_set_stbc(dev, set1);
+            break;
+        case AML_IWP_PT_SET_LOW_POWER_FLAG:
+            aml_set_lp_flag(dev, set1);
             break;
         case AML_IWP_SET_PT_CALIBRATION:
             aml_set_pt_calibration(dev, set1);
@@ -5530,11 +5649,11 @@ static int aml_iwpriv_send_para1(struct net_device *dev,
         case AML_IWP_SET_XOSC_CTUNE:
             aml_set_xosc_ctune(dev, wrqu, extra, set1);
             break;
-        if (aml_bus_type != PCIE_MODE) {
-            case AML_IWP_BUS_START_TEST:
+        case AML_IWP_BUS_START_TEST:
+            if (aml_bus_type != PCIE_MODE) {
                 aml_sdio_usb_start_test(dev, set1);
-                break;
-        }
+            }
+            break;
         case AML_IWP_SET_POWER_OFFSET:
             aml_set_power_offset(dev, wrqu, extra, set1);
             break;
@@ -5624,11 +5743,36 @@ static int aml_iwpriv_send_para1(struct net_device *dev,
             aml_iwpriv_reset_edca(dev, set1);
             break;
         case AML_IWP_SET_TCP_ACK_WINDOW_SCALE:
-             aml_set_tcp_tcp_ack_window_scaling(dev, set1);
-             break;
+            aml_set_tcp_tcp_ack_window_scaling(dev, set1);
+            break;
         case AML_IWP_SUSPEND_TRACE_ENABLE:
-             aml_enable_suspend_fw_trace(dev, set1);
-             break;
+            aml_enable_suspend_fw_trace(dev, set1);
+            break;
+#ifdef CONFIG_AML_NAN_SUPPORT
+        case AML_IWP_CANCEL_NAN_SVC_REQ:
+            aml_nan_cmd_cancel_service(dev, set1);
+            break;
+#endif
+        case AML_IWP_SET_WMM_IE:
+            aml_iwpriv_set_wmm_ie(dev, set1);
+            break;
+        case AML_IWP_SEND_ACTION_REQ:
+            aml_send_action_req(dev, set1);
+            break;
+        case AML_IWP_SET_BR_GAIN_IDX:
+            aml_set_br_gain_idx_req(dev, set1);
+            break;
+#ifdef CONFIG_AML_APF
+        case AML_IWP_ADD_APF_PROGRAM:
+            aml_add_apf_filter_program(dev, set1);
+            break;
+#endif
+        case AML_IWP_SET_REGDOM_EN:
+            aml_set_regdom_en(dev, set1);
+            break;
+        case AML_IWP_SET_COEX_MODE:
+            aml_set_coex_mode_cmd(dev, set1);
+            break;
         default:
             AML_ERR(" param err\n");
             break;
@@ -5640,10 +5784,13 @@ static int aml_iwpriv_send_para1(struct net_device *dev,
 static int aml_iwpriv_send_para2(struct net_device *dev,
     struct iw_request_info *info, union iwreq_data *wrqu, char *extra)
 {
+    struct aml_vif *vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = vif->aml_hw;
     int *param = (int *)extra;
     int sub_cmd = param[0];
     int set1 = param[1];
     int set2 = param[2];
+    uint8_t buf[1024] = {0};
 
     AML_INFO(" cmd:%d set1:%d set2:%d\n", sub_cmd, set1, set2);
 
@@ -5652,9 +5799,29 @@ static int aml_iwpriv_send_para2(struct net_device *dev,
             aml_set_legacy_rate(dev, set1, set2);
             break;
         case AML_IWP_SET_RF_REG:
+            if ((set1 == 0x7fffffff) || (set2 == 0x7fffffff)) {
+                scnprintf(buf, 1024,
+                    "*************************************************************************************************************\n"
+                    "* You are using a legacy iwpriv tool, strongly suggest using a latest iwpriv tool                           *\n"
+                    "* You also can using the legacy tool as below:                                                              *\n"
+                    "* iwpriv wlan0 set_reg 0xff000c80 0xff000c80 -> iwpriv wlan0 set_rf_reg_leg \"0xff00 0x0c80 0xff00 0x0c80\"   *\n"
+                    "*************************************************************************************************************\n");
+                AML_INFO("\n%s\n", buf);
+                break;
+            }
             aml_rf_reg_write(dev, set1, set2);
             break;
         case AML_IWP_SET_REG:
+            if ((set1 == 0x7fffffff) || (set2 == 0x7fffffff)) {
+                scnprintf(buf, 1024,
+                    "*************************************************************************************************************\n"
+                    "* You are using a legacy iwpriv tool, strongly suggest using a latest iwpriv tool                           *\n"
+                    "* You also can using the legacy tool as below:                                                              *\n"
+                    "* iwpriv wlan0 set_reg 0xff000c80 0xff000c80 -> iwpriv wlan0 set_reg_legacy \"0xff00 0x0c80 0xff00 0x0c80\"   *\n"
+                    "*************************************************************************************************************\n");
+                AML_INFO("\n%s\n", buf);
+                break;
+            }
             aml_set_reg(dev, set1, set2);
             break;
         case AML_IWP_SET_EFUSE:
@@ -5676,7 +5843,7 @@ static int aml_iwpriv_send_para2(struct net_device *dev,
             aml_emb_la_capture(dev, set1, set2);
             break;
         case AML_IWP_SNR_CFG:
-            aml_dyn_snr_cfg(dev, set1, set2);
+            aml_dynamic_snr_config(aml_hw, set1, set2);
             break;
         case AML_IWP_SET_DC_TONE:
             aml_set_tone(dev, set1, set2);
@@ -5692,6 +5859,15 @@ static int aml_iwpriv_send_para2(struct net_device *dev,
             break;
         case AML_IWP_SET_DEAYL_ACK_RSSI_THR:
             aml_set_tcp_delay_ack_rssi_thr(dev, set1,set2);
+            break;
+        case AML_IWP_SET_AGG_TX:
+            aml_set_agg_tx(dev, set1,set2);
+            break;
+        case AML_IWP_SET_AGG_RX:
+            aml_set_agg_rx(dev, set1,set2);
+            break;
+        case AML_IWP_SET_RX_BW_NSS:
+            aml_set_rx_bw_nss(dev, set1,set2);
             break;
         default:
             break;
@@ -5725,12 +5901,14 @@ static int aml_iwpriv_send_para3(struct net_device *dev,
             aml_pcie_prssr_test(dev, set1, set2, set3);
             break;
 #endif
-        case AML_COEX_CMD:
-            aml_coex_cmd(dev, set1, set2, set3);
-            break;
         case AML_IWP_SET_CCA_TIMER:
             aml_set_cca_timer(dev, set1, set2, set3);
             break;
+#ifdef CONFIG_AML_APF
+        case AML_IWP_SET_APF_MAC_ADDR:
+            aml_apf_set_mac_addr(dev, set1, set2, set3);
+            break;
+#endif
         default:
             break;
     }
@@ -5773,12 +5951,6 @@ static int aml_iwpriv_get(struct net_device *dev,
             break;
         case AML_IWP_GET_RATE_INFO:
             aml_get_rate_info(dev);
-            break;
-        case AML_IWP_GET_STATS:
-            aml_get_tx_stats(dev);
-            break;
-        case AML_IWP_CLEAR_STATS:
-            aml_clear_tx_stats(dev);
             break;
         case AML_IWP_GET_ACS_INFO:
             aml_get_acs_info(dev);
@@ -5857,7 +6029,17 @@ static int aml_iwpriv_get(struct net_device *dev,
         case AML_COEX_GET_STATUS:
             aml_coex_get_status(dev);
             break;
-
+        case AML_IWP_GET_AGG:
+            aml_get_aggregation(dev);
+            break;
+#ifdef CONFIG_AML_APF
+        case AML_IWP_DEL_APF_PROGRAM:
+            aml_del_apf_filter_program(dev);
+            break;
+#endif
+        case AML_IWP_CLOSE_SOCKET:
+            aml_close_netlink_socket(dev);
+            break;
         default:
             AML_ERR(" param err\n");
             break;
@@ -5870,9 +6052,11 @@ static int aml_iwpriv_get(struct net_device *dev,
 static int aml_iwpriv_get_char(struct net_device *dev,
     struct iw_request_info *info, union iwreq_data *wrqu, char *extra)
 {
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
     int sub_cmd = wrqu->data.flags;
 
-    char set[MAX_CHAR_SIZE] = {};
+    char set[MAX_CHAR_SIZE] = {0};
 
     if ((wrqu->data.length + 1) > sizeof(set))
         return -EFAULT;
@@ -5884,15 +6068,20 @@ static int aml_iwpriv_get_char(struct net_device *dev,
         }
     }
 
+    set[wrqu->data.length] = '\0';
+
     switch (sub_cmd) {
         case AML_IWP_PRINT_VERSION:
-            wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "%s", aml_get_version()) + 1;
+            wrqu->data.length = scnprintf(extra, IW_PRIV_SIZE_MASK, "%s", aml_get_drv_version()) + 1;
             break;
         case AML_IWP_GET_REG:
             aml_get_reg(dev, set, wrqu, extra);
             break;
         case AML_IWP_GET_RF_REG:
             aml_get_rf_reg(dev, set, wrqu, extra);
+            break;
+        case AML_IWP_GET_STATS:
+            wrqu->data.length = aml_print_stats(aml_hw, dev, set, extra);
             break;
         case AML_IWP_SEND_TWT_SETUP_REQ:
             aml_send_twt_req(dev, set, wrqu, extra);
@@ -5954,18 +6143,24 @@ static int aml_iwpriv_get_char(struct net_device *dev,
         case AML_IWP_GET_BT_DIGITAL_GAIN:
             aml_get_bt_digital_gain_efuse(dev, wrqu, extra);
             break;
+        case AML_IWP_GET_BR_GAIN_IDX:
+            aml_get_br_gain_idx_req(dev, wrqu, extra);
+            break;
 #ifdef CONFIG_AML_NAN_SUPPORT
         case AML_IWP_NAN_ENABLE:
-            aml_nan_enable(dev, set, wrqu, extra);
+            aml_nan_cmd_enable(dev, set, wrqu, extra);
             break;
         case AML_IWP_SEND_NAN_PUB_REQ:
-            aml_nan_cmd_publish_req(dev, set, wrqu, extra);
+            aml_nan_cmd_publish_service(dev, wrqu, extra);
             break;
         case AML_IWP_SEND_NAN_SUB_REQ:
-            aml_nan_cmd_subscribe_req(dev, set, wrqu, extra);
+            aml_nan_cmd_subscribe_service(dev, wrqu, extra);
             break;
         case AML_IWP_SEND_NAN_FUP_REQ:
-            aml_nan_cmd_followup_send(dev, set, wrqu, extra);
+            aml_nan_cmd_send_message(dev, set, wrqu, extra);
+            break;
+        case AML_IWP_NAN_DISABLE:
+            aml_nan_cmd_disable(dev, wrqu, extra);
             break;
 #endif
         case AML_IWP_SET_15P4_MAC_EFUSE:
@@ -5974,7 +6169,6 @@ static int aml_iwpriv_get_char(struct net_device *dev,
         case AML_IWP_GET_15P4_MAC_FROM_EFUSE:
             aml_get_15p4_mac_addr(dev,wrqu, extra);
             break;
-
         case AML_IWP_SET_CSI_RUNTIME:
             aml_set_csi_runtime(dev, set);
             break;
@@ -5984,6 +6178,26 @@ static int aml_iwpriv_get_char(struct net_device *dev,
         case AML_IWP_LOG_LEVELS:
             wrqu->data.length = aml_log_levels_set(set, extra);
             break;
+        case AML_IWP_LEGACY_SET_REG:
+            aml_set_reg_legacy(dev, set, wrqu, extra);
+            break;
+        case AML_IWP_LEGACY_SET_RF_REG:
+            aml_set_rf_reg_legacy(dev, set, wrqu, extra);
+            break;
+        case AML_IWP_GET_RF_LOW_POWER_FALG:
+            aml_get_rf_low_power_flag(dev, set, wrqu, extra);
+            break;
+        case AML_IWP_GET_TEMP:
+            wrqu->data.length = aml_print_temperature(wrqu, extra);
+            break;
+        case AML_IWP_SET_PROT_TYPE:
+            aml_set_prot_type(wrqu, extra, dev, set);
+            break;
+        case AML_IWP_GET_WIFI_INFO:
+            aml_show_wifi_info_work(aml_hw, NULL, 0);
+            break;
+        case AML_IWP_PT_SEC_TEST:
+            aml_trig_sec_test(dev, wrqu, extra);
         default:
             break;
     }
@@ -5998,6 +6212,7 @@ static int aml_iwpriv_get_int(struct net_device *dev,
 
     char set[MAX_CHAR_SIZE];
 
+    set[0] = '\0';
     if (wrqu->data.length > 0) {
         if (copy_from_user(set,
             wrqu->data.pointer, wrqu->data.length)) {
@@ -6007,15 +6222,17 @@ static int aml_iwpriv_get_int(struct net_device *dev,
     }
 
     switch (sub_cmd) {
-        case AML_IWP_GET_CSI_STATUS_COM:
-            aml_get_csi_status_com(dev, wrqu);
-            break;
-        case AML_IWP_GET_CSI_STATUS_SP:
-            aml_get_csi_status_sp(dev, wrqu, set);
-            break;
         case AML_IWP_GET_CSI_LINK_INFO:
             aml_get_csi_link_info(dev, wrqu);
             break;
+#ifdef CONFIG_AML_APF
+        case AML_IWP_GET_APF_CAPABILITIES:
+            aml_get_apf_capa(dev);
+            break;
+        case AML_IWP_GET_APF_STATUS:
+            aml_iwpriv_get_apf_status(dev);
+            break;
+#endif
         default:
             break;
     }
@@ -6030,22 +6247,199 @@ int iw_standard_set_mode(struct net_device *dev, struct iw_request_info *info,
     struct aml_hw *aml_hw = vif->aml_hw;
 
     AML_INFO("param:%d", wrqu->param.value);
-    aml_cfg80211_change_iface(aml_hw->wiphy, dev,
-            (enum nl80211_iftype)wrqu->param.value, NULL);
+    aml_cfg80211_change_iface(aml_hw->wiphy, dev, (enum nl80211_iftype)wrqu->param.value,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
+                              NULL,
+#endif
+                              NULL);
 
     return 0;
 }
 
+#define IFNAMSIZ 16
 int iw_standard_get_name(struct net_device *dev, struct iw_request_info *info,
     union iwreq_data *wrqu, char *extra)
 {
-    strscpy(wrqu->name, "IEEE 802.11b/g/n/ac/ax", sizeof(wrqu->name));
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    enum nl80211_iftype iftype;
+
+    list_for_each_entry(aml_vif, &aml_hw->vifs, list) {
+        if (!aml_vif->up || aml_vif->ndev == NULL) {
+            continue;
+        }
+        iftype = AML_VIF_TYPE(aml_vif);
+
+        if (iftype == NL80211_IFTYPE_STATION) {
+            if (aml_vif->sta.ap && aml_vif->sta.ap->valid) {
+                switch (aml_vif->sta.ap->stats.format_mod) {
+                    case FORMATMOD_NON_HT:
+                    case FORMATMOD_NON_HT_DUP_OFDM:
+                         snprintf(wrqu->name, IFNAMSIZ,
+                            (aml_vif->sta.ap->band == NL80211_BAND_5GHZ) ? "IEEE 802.11a" : "IEEE 802.11bg");
+                         break;
+                     case FORMATMOD_HT_MF:
+                         snprintf(wrqu->name, IFNAMSIZ, "IEEE 802.11bgn");
+                         break;
+                     case FORMATMOD_HT_GF:
+                         snprintf(wrqu->name, IFNAMSIZ, "IEEE 802.11n");
+                         break;
+                     case FORMATMOD_VHT:
+                         snprintf(wrqu->name, IFNAMSIZ, "IEEE 802.11ac");
+                         break;
+                     default:
+                         snprintf(wrqu->name, IFNAMSIZ, "IEEE 802.11ax");
+                         break;
+                }
+            } else {
+                snprintf(wrqu->name, IFNAMSIZ, "unassociated");
+            }
+        }
+    }
+
+    return 0;
+}
+
+int iw_standard_get_range(struct net_device *dev, struct iw_request_info *info,
+    union iwreq_data *wrqu, char *extra)
+{
+    struct iw_range * range = (struct iw_range *)extra;
+
+    memset(range, 0 , sizeof(*range));
+    range->throughput = 20000000; /*20Mbps*/
+    range->min_nwid = 0;
+    range->max_nwid = 0;
+    range->we_version_compiled  = WIRELESS_EXT;
+    range->we_version_source = WIRELESS_EXT;
+
+    return 0;
+}
+
+
+int iw_standard_get_ap(struct net_device *dev, struct iw_request_info *info,
+    union iwreq_data *wrqu, char *extra)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    enum nl80211_iftype iftype;
+
+    struct sockaddr * addr = &(wrqu->ap_addr);
+    list_for_each_entry(aml_vif, &aml_hw->vifs, list) {
+         if (!aml_vif->up || aml_vif->ndev == NULL) {
+             continue;
+         }
+         iftype = AML_VIF_TYPE(aml_vif);
+
+         if (iftype == NL80211_IFTYPE_STATION) {
+            if (aml_vif->sta.ap && aml_vif->sta.ap->valid) {
+                memcpy(addr->sa_data, aml_vif->sta.ap->mac_addr, ETH_ALEN);
+            }
+         }
+    }
+
+    return 0;
+}
+
+int iw_standard_get_essid(struct net_device *dev, struct iw_request_info *info,
+    union iwreq_data *wrqu, char *extra)
+{
+    struct iw_point * essid = &(wrqu->essid);
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    enum nl80211_iftype iftype;
+
+    list_for_each_entry(aml_vif, &aml_hw->vifs, list) {
+         if (!aml_vif->up || aml_vif->ndev == NULL) {
+             continue;
+         }
+         iftype = AML_VIF_TYPE(aml_vif);
+
+         if (iftype == NL80211_IFTYPE_STATION) {
+            if (aml_vif->sta.ap && aml_vif->sta.ap->valid) {
+                essid->length = aml_vif->sta.assoc_ssid_len;
+                memcpy(extra, aml_vif->sta.assoc_ssid, aml_vif->sta.assoc_ssid_len);
+                essid->flags = 1;
+            }
+         }
+    }
+    return 0;
+}
+
+int iw_standard_get_stats(struct net_device *dev, struct iw_request_info *info,
+    union iwreq_data *wrqu, char *extra)
+{
+    return 0;
+}
+
+extern int aml_freq_to_idx(struct aml_hw *aml_hw, int freq);
+static struct iw_statistics *aml_get_wireless_stats(struct net_device *dev)
+{
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    struct iw_statistics *wstats = &aml_vif->wstats;
+    struct aml_survey_info * aml_survey;
+    enum nl80211_iftype iftype;
+
+    list_for_each_entry(aml_vif, &aml_hw->vifs, list) {
+         if (!aml_vif->up || aml_vif->ndev == NULL) {
+             continue;
+         }
+         iftype = AML_VIF_TYPE(aml_vif);
+
+         if (iftype == NL80211_IFTYPE_STATION) {
+            if (aml_vif->sta.ap && aml_vif->sta.ap->valid) {
+                aml_survey = &aml_hw->survey[aml_freq_to_idx(aml_hw, aml_vif->sta.ap->center_freq)];
+                wstats->qual.qual = 0;
+                wstats->qual.level = (AML_REG_READ(aml_hw->plat, AML_ADDR_MAC_PHY, REG_OF_SYNC_RSSI) & 0xffff) - 256;
+                wstats->qual.noise = aml_survey->noise_dbm;
+                wstats->qual.updated = IW_QUAL_ALL_UPDATED | IW_QUAL_DBM;
+            }
+            else
+            {
+                wstats->qual.qual = 0;
+                wstats->qual.level = 0;
+                wstats->qual.noise = 0;
+                wstats->qual.updated = IW_QUAL_ALL_UPDATED | IW_QUAL_DBM;
+            }
+         }
+    }
+
+    return wstats;
+}
+
+int iw_standard_get_freq(struct net_device *dev, struct iw_request_info *info,
+    union iwreq_data *wrqu, char *extra)
+{
+    struct iw_freq * pr_iw_freq = &(wrqu->freq);
+    struct aml_vif *aml_vif = netdev_priv(dev);
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
+    enum nl80211_iftype iftype;
+
+    list_for_each_entry(aml_vif, &aml_hw->vifs, list) {
+        if (!aml_vif->up || aml_vif->ndev == NULL) {
+            continue;
+        }
+        iftype = AML_VIF_TYPE(aml_vif);
+
+        if (iftype == NL80211_IFTYPE_STATION) {
+
+            if (aml_vif->sta.ap && aml_vif->sta.ap->valid) {
+                pr_iw_freq->m = aml_vif->sta.ap->center_freq;
+                pr_iw_freq->e = 6;
+            }
+        }
+    }
     return 0;
 }
 
 static const iw_handler standard_handler[] = {
     IW_HANDLER(SIOCSIWMODE,    (iw_handler)iw_standard_set_mode),
     IW_HANDLER(SIOCGIWNAME,    (iw_handler)iw_standard_get_name),
+    IW_HANDLER(SIOCGIWRANGE,    (iw_handler)iw_standard_get_range),
+    IW_HANDLER(SIOCGIWAP,    (iw_handler)iw_standard_get_ap),
+    IW_HANDLER(SIOCGIWESSID,    (iw_handler)iw_standard_get_essid),
+    IW_HANDLER(SIOCGIWSTATS,    (iw_handler)iw_standard_get_stats),
+    IW_HANDLER(SIOCGIWFREQ,    (iw_handler)iw_standard_get_freq),
     NULL,
 };
 
@@ -6086,10 +6480,10 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
         0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "get_rate_info"},
     {
         AML_IWP_GET_STATS,
-        0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "get_stats"},
-    {
-        AML_IWP_CLEAR_STATS,
-        0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "clear_stats"},
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK,
+        "get_stats"
+    },
     {
         AML_IWP_GET_ACS_INFO,
         0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "get_acs"},
@@ -6151,6 +6545,17 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
         AML_IWP_STOP_DC_TONE,
         0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "stop_dc_tone"},
     {
+        AML_IWP_GET_AGG,
+        0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "get_agg"},
+    {
+        AML_IWP_CLOSE_SOCKET,
+        0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "close_socket"},
+#ifdef CONFIG_AML_APF
+    {
+        AML_IWP_DEL_APF_PROGRAM,
+        0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "del_apf"},
+#endif
+    {
         SIOCIWFIRSTPRIV + 1,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, ""},
     {
@@ -6183,6 +6588,9 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
     {
         AML_IWP_SET_STBC,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_stbc"},
+    {
+        AML_IWP_PT_SET_LOW_POWER_FLAG,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_pt_lp_flag"},
     {
         AML_IWP_SET_PT_CALIBRATION,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_pt_cali"},
@@ -6299,8 +6707,27 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
         AML_IWP_SUSPEND_TRACE_ENABLE,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_susp_trace"},
     {
+        AML_IWP_SET_BR_GAIN_IDX,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_br_gain_idx"},
+#ifdef CONFIG_AML_NAN_SUPPORT
+    {
+        AML_IWP_CANCEL_NAN_SVC_REQ,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "nan_cancel_svc"},
+#endif
+#ifdef CONFIG_AML_APF
+    {
+        AML_IWP_ADD_APF_PROGRAM,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "add_apf"},
+#endif
+    {
+        AML_IWP_SET_COEX_MODE,
+            IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "coex_mode"},
+    {
         SIOCIWFIRSTPRIV + 2,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2, 0, ""},
+    {
+        AML_IWP_SET_REGDOM_EN,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "regdom_en"},
     {
         AML_IWP_SET_RATE_LEGACY_CCK,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2, 0, "set_rate_cck"},
@@ -6347,6 +6774,15 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
         AML_IWP_SET_BT_DIGITAL_GAIN,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2, 0, "set_bt_dg"},
     {
+        AML_IWP_SET_AGG_TX,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2, 0, "set_agg_tx"},
+    {
+        AML_IWP_SET_AGG_RX,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2, 0, "set_agg_rx"},
+    {
+        AML_IWP_SET_RX_BW_NSS,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2, 0, "set_rx_bw_nss"},
+    {
         SIOCIWFIRSTPRIV + 3,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3, 0, ""},
     {
@@ -6369,9 +6805,11 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
         AML_IWP_PCIE_TEST,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3, 0, "pcie_test"},
 #endif
+#ifdef CONFIG_AML_APF
     {
-        AML_COEX_CMD,
-        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3, 0, "coex_cmd"},
+        AML_IWP_SET_APF_MAC_ADDR,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3, 0, "apf_set_mac"},
+#endif
     {
         SIOCIWFIRSTPRIV + 5,
         IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, ""},
@@ -6387,6 +6825,15 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
     {
         AML_IWP_SET_EARLY_BEACON,
         IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "set_early_bcn"},
+    {
+        AML_IWP_LEGACY_SET_REG,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "set_reg_legacy"},
+    {
+        AML_IWP_LEGACY_SET_RF_REG,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "set_rf_reg_leg"},
+    {
+        AML_IWP_SET_PROT_TYPE,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "set_prot_type"},
 #ifdef CONFIG_AML_NAN_SUPPORT
     {
         AML_IWP_NAN_ENABLE,
@@ -6400,6 +6847,9 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
     {
         AML_IWP_SEND_NAN_FUP_REQ,
         IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "nan_fup_req"},
+    {
+        AML_IWP_NAN_DISABLE,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "nan_disable"},
 #endif
     {
         AML_IWP_GET_EFUSE,
@@ -6444,6 +6894,9 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
         AML_IWP_GET_BT_DIGITAL_GAIN,
         IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "get_bt_dg"},
     {
+        AML_IWP_GET_BR_GAIN_IDX,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "get_br_gain_idx"},
+    {
         AML_IWP_SET_TX_START,
         IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "pt_tx_start"},
     {
@@ -6465,14 +6918,16 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
         SIOCIWFIRSTPRIV + 7,
         IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_MASK, ""},
     {
-        AML_IWP_GET_CSI_STATUS_COM,
-        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_MASK, "get_csi_com"},
-    {
-        AML_IWP_GET_CSI_STATUS_SP,
-        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_MASK, "get_csi_sp"},
-    {
         AML_IWP_GET_CSI_LINK_INFO,
         IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_MASK, "get_link_info"},
+#ifdef CONFIG_AML_APF
+    {
+        AML_IWP_GET_APF_CAPABILITIES,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_MASK, "get_apf_cap"},
+    {
+        AML_IWP_GET_APF_STATUS,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_MASK, "get_apf_status"},
+#endif
     {
         SIOCIWFIRSTPRIV + 9,
         IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_FIXED | 4, 0, ""},
@@ -6484,49 +6939,66 @@ static const struct iw_priv_args aml_iwpriv_private_args[] = {
         0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "clk_msr"},
 #ifdef CONFIG_SDIO_TX_ENH
 #ifdef SDIO_TX_ENH_DBG
-        {
-            AML_IWP_GET_SDIO_TX_ENH_STATS,
-            0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "get_txenh_log"},
-        {
-            AML_IWP_RESET_SDIO_TX_ENH_STATS,
-            0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "reset_txenh_log"},
+    {
+        AML_IWP_GET_SDIO_TX_ENH_STATS,
+        0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "get_txenh_log"},
+    {
+        AML_IWP_RESET_SDIO_TX_ENH_STATS,
+        0, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "reset_txenh_log"},
 #endif
-        {
-            AML_IWP_SET_TXCFM_READ_THR,
-            IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_tcrd_thr"},
-        {
-            AML_IWP_SET_DYN_TXCFM,
-            IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_dyn_txcfm"},
-        {
-            AML_IWP_SET_IRQLESS_FLAG,
-            IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_irqless"},
+    {
+        AML_IWP_SET_TXCFM_READ_THR,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_tcrd_thr"},
+    {
+        AML_IWP_SET_DYN_TXCFM,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_dyn_txcfm"},
+    {
+        AML_IWP_SET_IRQLESS_FLAG,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_irqless"},
 #endif
-        {
-            AML_IWP_SET_EFUSE_VENDOR_SN,
+    {
+        AML_IWP_SET_EFUSE_VENDOR_SN,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK,
+        "set_vendor_sn"},
+    {
+        AML_IWP_GET_EFUSE_VENDOR_SN,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK,
+        "get_vendor_sn"},
+    {
+        AML_IWP_SET_MCC_RATIO,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_mcc_ratio"},
+    {
+        AML_IWP_SET_RTS_BASED_TXOP,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_wfa_rts_on"},
+    {
+        AML_IWP_SET_AGG_TX_CNT_THRES,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_wfa_agg_thre"},
+    {
+        AML_IWP_RESET_EDCA,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "reset_wfa_edca"},
+    {
+        AML_IWP_SET_WMM_IE,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_wfa_wmm_ie"},
+    {
+        AML_IWP_SEND_ACTION_REQ,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "send_action_req"},
+    {
+        AML_IWP_LOG_LEVELS,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "log_levels"},
+    {
+        AML_IWP_GET_TEMP,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "get_temp"},
+    {
+        AML_IWP_GET_RF_LOW_POWER_FALG,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "get_pt_lp_flag"},
+    {
+        AML_IWP_GET_WIFI_INFO,
+        IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, "get_wifi_info"},
+    {
+            AML_IWP_PT_SEC_TEST,
             IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK,
-            "set_vendor_sn"},
-        {
-            AML_IWP_GET_EFUSE_VENDOR_SN,
-            IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK, IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK,
-            "get_vendor_sn"},
-        {
-            AML_IWP_SET_MCC_RATIO,
-            IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_mcc_ratio"},
-        {
-            AML_IWP_SET_RTS_BASED_TXOP,
-            IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_wfa_rts_on"},
-        {
-            AML_IWP_SET_AGG_TX_CNT_THRES,
-            IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "set_wfa_agg_thre"},
-        {
-            AML_IWP_RESET_EDCA,
-            IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "reset_wfa_edca"},
-        {
-            AML_IWP_LOG_LEVELS,
-            IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK,
-            IW_PRIV_TYPE_CHAR | IW_PRIV_SIZE_MASK,
-            "log_levels"
-        },
+            "trig_sec_test"},
+
 };
 #endif
 
@@ -6539,6 +7011,7 @@ struct iw_handler_def iw_handle = {
     .standard = (iw_handler *)standard_handler,
     .private = aml_iwpriv_private_handler,
     .private_args = aml_iwpriv_private_args,
+    .get_wireless_stats = aml_get_wireless_stats,
 #endif
 };
 

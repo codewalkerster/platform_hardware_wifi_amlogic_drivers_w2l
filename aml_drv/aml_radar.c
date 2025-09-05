@@ -683,7 +683,7 @@ struct pri_sequence * pde_short_check_detection(struct pri_detector *pde)
  *                  SHORT/WEATHER/INTERLEAVED radar waveform
  * @pde: pointer on pri_detector
  *
- * Initialize pri_detector window size to the maximun size of one burst
+ * Initialize pri_detector window size to the maximum size of one burst
  * for the radar specification associated.
  */
 static
@@ -900,8 +900,8 @@ static struct pri_detector_ops pri_detector_long = {
  * @radar_type: index of radar pattern
  * @freq: Frequency of the pri detector
  */
-struct pri_detector *pri_detector_init(struct dfs_pattern_detector *dpd,
-                                       u16 radar_type, u16 freq)
+static struct pri_detector *pri_detector_init(struct dfs_pattern_detector *dpd,
+                                              u16 radar_type, u16 freq)
 {
     struct pri_detector *pde;
 
@@ -1260,7 +1260,7 @@ static u16 aml_radar_get_center_freq(struct aml_hw *aml_hw, u8 chain)
         return aml_hw->cur_freq;
 #else
         if (!aml_chanctx_valid(aml_hw, aml_hw->cur_chanctx)) {
-            WARN(1, "Radar pulse without channel information");
+            AML_ERR("Radar pulse without channel information");
         } else
             return aml_hw->chanctx_table[aml_hw->cur_chanctx].chan_def.center_freq1;
 #endif /* CONFIG_AML_SOFTMAC */
@@ -1277,7 +1277,7 @@ static void aml_radar_detected(struct aml_hw *aml_hw)
     struct cfg80211_chan_def chan_def;
 
     if (!aml_chanctx_valid(aml_hw, aml_hw->cur_chanctx)) {
-        WARN(1, "Radar detected without channel information");
+        AML_ERR("Radar detected without channel information");
         return;
     }
 
@@ -1355,8 +1355,10 @@ static void aml_radar_process_pulse(struct work_struct *ws)
                 u16 idx = radar->detected[chain].index;
 
                 if (chain == AML_RADAR_RIU) {
+                    spin_lock_bh(&radar->lock);
                     /* operating chain, inform upper layer to change channel */
                     if (radar->dpd[chain]->enabled == AML_RADAR_DETECT_REPORT) {
+                        spin_unlock_bh(&radar->lock);
                         aml_radar_detected(aml_hw);
                         /* no need to report new radar until upper layer set a
                            new channel. This prevent warning if a new radar is
@@ -1368,6 +1370,8 @@ static void aml_radar_process_pulse(struct work_struct *ws)
                            function (we are sure not to interfer with tasklet
                            as we disable detection just before) */
                         radar->pulses[chain].count = 0;
+                    } else {
+                        spin_unlock_bh(&radar->lock);
                     }
                 } else {
                     /* secondary radar detection chain, simply report info in
@@ -1395,7 +1399,7 @@ static void aml_radar_cac_work(struct work_struct *ws)
     struct aml_chanctx *ctxt;
 
     if (radar->cac_vif == NULL) {
-        WARN(1, "CAC finished but no vif set");
+        AML_ERR("CAC finished but no vif set");
         return;
     }
 
@@ -1416,6 +1420,7 @@ static void aml_radar_cac_work(struct work_struct *ws)
 
 bool aml_radar_detection_init(struct aml_radar *radar)
 {
+    /* coverity[USELESS_CALL] - standard kernel interface */
     spin_lock_init(&radar->lock);
 
     radar->dpd[AML_RADAR_RIU] = dfs_pattern_detector_init(NL80211_DFS_UNSET,
@@ -1466,16 +1471,17 @@ bool aml_radar_set_domain(struct aml_radar *radar,
 
 void aml_radar_detection_enable(struct aml_radar *radar, u8 enable, u8 chain)
 {
+    spin_lock_bh(&radar->lock);
     if (chain < AML_RADAR_LAST ) {
         trace_radar_enable_detection(radar->dpd[chain]->region, enable, chain);
-        spin_lock_bh(&radar->lock);
         radar->dpd[chain]->enabled = enable;
-        spin_unlock_bh(&radar->lock);
     }
+    spin_unlock_bh(&radar->lock);
 }
 
 bool aml_radar_detection_is_enable(struct aml_radar *radar, u8 chain)
 {
+    /* coverity[missing_lock] --ignore */
     return radar->dpd[chain]->enabled != AML_RADAR_DETECT_DISABLE;
 }
 
@@ -1483,7 +1489,8 @@ bool aml_radar_detection_is_enable(struct aml_radar *radar, u8 chain)
 void aml_radar_start_cac(struct aml_radar *radar, u32 cac_time_ms,
                           struct aml_vif *vif)
 {
-    WARN(radar->cac_vif != NULL, "CAC already in progress");
+    if (radar->cac_vif != NULL)
+        AML_INFO("CAC already in progress");
     radar->cac_vif = vif;
     schedule_delayed_work(&radar->cac_work, msecs_to_jiffies(cac_time_ms));
 }

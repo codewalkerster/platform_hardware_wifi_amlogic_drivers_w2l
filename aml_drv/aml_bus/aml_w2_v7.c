@@ -8,7 +8,8 @@
  ******************************************************************************
  */
 
-#define AML_MODULE  GENERIC
+#define AML_MODULE          PCI
+#define AML_FMT             AML_FMT_M
 
 #include "aml_w2_v7.h"
 #include "aml_log.h"
@@ -182,7 +183,8 @@ void pcie_addr_map(struct pci_dev *pci_dev, u64 src_addr, u64 trsl_addr, u64 tab
         atr_size++;
     }
 
-    atr_size = atr_size - 1 - 1;
+    if (atr_size > 2)
+        atr_size = atr_size - 1 - 1;
     /*
     [ATR_PARAM]
     Bit [0]:     ATR_IMPL: ATR_IMPL Field is 1 bit long. When set to 1, it
@@ -232,6 +234,7 @@ void pcie_addr_map(struct pci_dev *pci_dev, u64 src_addr, u64 trsl_addr, u64 tab
     aml_pcie_write(g_pcie_bar0_base_addr + address + 0x10, trsl_param);
 }
 
+#ifdef CONFIG_PCI_MSI
 static void aml_v7_platform_deinit(struct aml_plat_pci *aml_plat_pci)
 {
     struct aml_v7 *aml_v7 = (struct aml_v7 *)aml_plat_pci->priv;
@@ -246,15 +249,16 @@ static void aml_v7_platform_deinit(struct aml_plat_pci *aml_plat_pci)
     pci_disable_msi(aml_plat_pci->pci_dev);
     kfree(aml_plat_pci);
 }
+#endif
 
 /* aml w2 wifi/bt Recommend PCIe 1.0 */
 void aml_pcie_speed_check(struct pci_dev *dev)
 {
-    u32 lnksta;
+    u32 lnksta = 0;
     enum pci_bus_speed pci_speed;
-
-    pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &lnksta);
-
+#ifndef CONFIG_ROKU
+    pcie_capability_read_word(dev, PCI_EXP_LNKSTA, (u16 *)&lnksta);
+#endif
     pci_speed = lnksta & PCI_EXP_LNKSTA_CLS;
     AML_INFO(" pcie link speed is %s\n",
         (pci_speed == PCI_EXP_LNKSTA_CLS_2_5GB) ? "PCI_EXP_LNKSTA_CLS_2_5GB" :
@@ -266,6 +270,9 @@ void aml_pcie_speed_check(struct pci_dev *dev)
 
 int aml_v7_platform_init(struct pci_dev *pci_dev, struct aml_plat_pci **aml_plat_pci)
 {
+#ifndef CONFIG_PCI_MSI
+    return -1;
+#else
     struct aml_v7 *aml_v7;
     int ret = -ENOMEM;
     unsigned long bar2_base_addr;
@@ -388,6 +395,7 @@ int aml_v7_platform_init(struct pci_dev *pci_dev, struct aml_plat_pci **aml_plat
   out_bar0:
     kfree(*aml_plat_pci);
     return ret;
+#endif
 }
 
 #endif

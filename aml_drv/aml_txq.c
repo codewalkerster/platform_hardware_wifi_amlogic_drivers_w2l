@@ -8,7 +8,6 @@
  ******************************************************************************
  */
 
-#include "aml_defs.h"
 #include "aml_tx.h"
 #include "ipc_host.h"
 #include "aml_events.h"
@@ -44,7 +43,6 @@ struct aml_txq *aml_txq_sta_get(struct aml_sta *aml_sta, u8 tid)
 
     return (struct aml_txq *)mac_txq->drv_priv;
 }
-
 
 struct aml_txq *aml_txq_vif_get(struct aml_vif *aml_vif, u8 ac)
 {
@@ -113,22 +111,13 @@ static inline int aml_txq_vif_idx(struct aml_vif *vif, u8 type)
 
 struct aml_txq *aml_txq_sta_get(struct aml_sta *sta, u8 tid, struct aml_hw *aml_hw)
 {
+    BUG_ON(!sta);
+    BUG_ON(!aml_hw->txq);
+
     if (tid >= NX_NB_TXQ_PER_STA)
         tid = 0;
 
-#ifdef CONFIG_AML_PREALLOC_BUF_STATIC
-    if (!sta) {
-        AML_INFO("aml sta is null, return null in case of race condition");
-        return NULL;
-    }
-    if (!aml_hw->txq) {
-        AML_INFO("aml txq is null");
-        return NULL;
-    }
-    return aml_hw->txq + aml_txq_sta_idx(sta, tid);
-#else
     return &aml_hw->txq[aml_txq_sta_idx(sta, tid)];
-#endif
 }
 
 struct aml_txq *aml_txq_vif_get(struct aml_vif *vif, u8 type)
@@ -136,11 +125,7 @@ struct aml_txq *aml_txq_vif_get(struct aml_vif *vif, u8 type)
     if (type > NX_UNK_TXQ_TYPE)
         type = NX_BCMC_TXQ_TYPE;
 
-#ifdef CONFIG_AML_PREALLOC_BUF_STATIC
-    return vif->aml_hw->txq + aml_txq_vif_idx(vif, type);
-#else
     return &vif->aml_hw->txq[aml_txq_vif_idx(vif, type)];
-#endif
 }
 
 static inline struct aml_sta *aml_txq_2_sta(struct aml_txq *txq)
@@ -222,6 +207,7 @@ static void aml_txq_init(struct aml_txq *txq, int idx, u8 status,
     txq->amsdu_len = 0;
 #endif /* CONFIG_AML_AMSDUS_TX */
 #endif /* CONFIG_AML_SOFTMAC */
+    /* coverity[side_effect_free] - standard kernel interface */
     spin_lock_init(&txq->txq_lock);
 }
 
@@ -278,8 +264,8 @@ void aml_txq_drop_skb(struct aml_txq *txq, struct sk_buff *skb, struct aml_hw *a
     if (retry_packet) {
         txq->nb_retry--;
         if (txq->nb_retry == 0) {
-            WARN(skb != txq->last_retry_skb,
-                 "last dropped retry buffer is not the expected one");
+            if (skb != txq->last_retry_skb)
+                AML_ERR("last dropped retry buffer is not the expected one");
             txq->last_retry_skb = NULL;
         }
     }
@@ -320,7 +306,7 @@ void aml_txq_flush(struct aml_hw *aml_hw, struct aml_txq *txq)
     }
 
     if (pushed)
-        PRINT("warning TXQ[%d]: %d skb still pushed to the FW",
+        AML_INFO("Warning TXQ[%d]: %d skb still pushed to the FW",
                  txq->idx, pushed);
 }
 
@@ -339,7 +325,7 @@ static void aml_txq_deinit(struct aml_hw *aml_hw, struct aml_txq *txq)
         spin_unlock_bh(&aml_hw->tx_lock);
         return;
     }
-    AML_INFO("txq deinit, txq idx=%d, vif_idx=%d",
+    AML_INFO("txq deinit, txq idx=%d, vif_idx=%d\n",
             txq->idx, txq->sta == NULL ? 0xff : txq->sta->vif_idx);
     aml_txq_del_from_hw_list(txq);
     aml_txq_flush(aml_hw, txq);
@@ -444,11 +430,14 @@ void aml_txq_vif_deinit(struct aml_hw * aml_hw, struct aml_vif *aml_vif)
 void aml_txq_sta_init(struct aml_hw *aml_hw, struct aml_sta *aml_sta,
                        u8 status)
 {
-    struct aml_txq *txq;
+    struct aml_txq *txq = NULL;
     int tid, idx;
+    struct aml_vif *aml_vif = NULL;
 
 #ifdef CONFIG_AML_SOFTMAC
     struct ieee80211_sta *sta = aml_to_ieee80211_sta(aml_sta);
+    if (!sta)
+        return;
     idx = aml_txq_sta_idx(aml_sta, 0);
 
     foreach_sta_txq_safe(aml_sta, txq, tid, aml_hw) {
@@ -457,7 +446,10 @@ void aml_txq_sta_init(struct aml_hw *aml_hw, struct aml_sta *aml_sta,
     }
 
 #else
-    struct aml_vif *aml_vif = aml_hw->vif_table[aml_sta->vif_idx];
+    aml_vif = aml_hw->vif_table[aml_sta->vif_idx];
+    if (!aml_vif)
+        return;
+
     idx = aml_txq_sta_idx(aml_sta, 0);
 
     foreach_sta_txq_safe(aml_sta, txq, tid, aml_hw) {
@@ -481,7 +473,7 @@ void aml_txq_sta_init(struct aml_hw *aml_hw, struct aml_sta *aml_sta,
  */
 void aml_txq_sta_deinit(struct aml_hw *aml_hw, struct aml_sta *aml_sta)
 {
-    struct aml_txq *txq;
+    struct aml_txq *txq = NULL;
     int tid;
 
     foreach_sta_txq_safe(aml_sta, txq, tid, aml_hw) {
@@ -530,13 +522,8 @@ void aml_txq_unk_vif_deinit(struct aml_vif *aml_vif)
 void aml_txq_offchan_init(struct aml_vif *aml_vif)
 {
     struct aml_hw *aml_hw = aml_vif->aml_hw;
-    struct aml_txq *txq;
+    struct aml_txq *txq = &aml_hw->txq[NX_OFF_CHAN_TXQ_IDX];
 
-#ifdef CONFIG_AML_PREALLOC_BUF_STATIC
-    txq = aml_hw->txq + NX_OFF_CHAN_TXQ_IDX;
-#else
-    txq = &aml_hw->txq[NX_OFF_CHAN_TXQ_IDX];
-#endif
     aml_txq_init(txq, NX_OFF_CHAN_TXQ_IDX, AML_TXQ_STOP_CHAN,
                   &aml_hw->hwq[AML_HWQ_VO], TID_MGT, NULL, aml_vif->ndev);
 }
@@ -551,14 +538,9 @@ void aml_txq_offchan_init(struct aml_vif *aml_vif)
  */
 void aml_txq_offchan_deinit(struct aml_vif *aml_vif)
 {
-    struct aml_txq *txq;
+    struct aml_hw *aml_hw = aml_vif->aml_hw;
 
-#ifdef CONFIG_AML_PREALLOC_BUF_STATIC
-    txq = aml_vif->aml_hw->txq + NX_OFF_CHAN_TXQ_IDX;
-#else
-    txq = &aml_vif->aml_hw->txq[NX_OFF_CHAN_TXQ_IDX];
-#endif
-    aml_txq_deinit(aml_vif->aml_hw, txq);
+    aml_txq_deinit(aml_hw, &aml_hw->txq[NX_OFF_CHAN_TXQ_IDX]);
 }
 
 
@@ -647,9 +629,9 @@ static bool aml_txq_drop_old_traffic(struct aml_txq *txq, struct aml_hw *aml_hw,
                 txq->sta->ps.sp_cnt[txq->ps_id] --;
                 if (txq->push_limit)
                     txq->push_limit--;
-                if (WARN(((txq->ps_id == UAPSD_ID) &&
-                          (txq->sta->ps.sp_cnt[txq->ps_id] == 0)),
-                         "Drop last packet of UAPSD service period")) {
+                if ((txq->ps_id == UAPSD_ID) &&
+                    (txq->sta->ps.sp_cnt[txq->ps_id] == 0)) {
+                    AML_ERR("Drop last packet of UAPSD service period");
                     // TODO: inform FW to end SP
                 }
             }
@@ -681,27 +663,67 @@ static bool aml_txq_drop_old_traffic(struct aml_txq *txq, struct aml_hw *aml_hw,
  * @vif: Vif to process
  * @return Whether there is still pkt queued in any TXQ.
  */
-
-void aml_show_tx_msg(struct aml_hw *aml_hw,struct aml_wq *aml_wq)
+static int aml_vif_txqs_dump(struct aml_hw *aml_hw, void *ptr)
 {
-    struct aml_vif *vif = (struct aml_vif *)aml_wq->data;
-    AML_INFO("vif:%d",vif->vif_index);
+    struct aml_vif *vif = ptr;
+
     aml_get_txq(vif->ndev);
     aml_txq_unexpection(vif->ndev);
+
+    return 0;
 }
+
+static void aml_txq_drop_dump(struct aml_vif *vif, const char *txq_name)
+{
+    struct aml_txq *txq = NULL;
+    int tid;
+    bool trigger = true;
+    AML_ERR("VIF%d/%s: Dropped packet(s) in %s TXQ(s)\n",
+            vif->vif_index, vif->ndev->name, txq_name);
+
+    /* coverity[missing_lock] */
+    AML_ERR("tot_page_num=%d, free_page_num=%d\n", vif->aml_hw->g_tx_param.tot_page_num, vif->aml_hw->g_tx_param.tx_page_free_num);
+    aml_wq_do_ptr(aml_vif_txqs_dump, vif->aml_hw, vif);
+
 #ifdef CONFIG_AML_RECOVERY
-extern struct aml_recy *aml_recy;
+    if (AML_VIF_TYPE(vif) ==  NL80211_IFTYPE_STATION) {
+        if (vif->sta.ap) {
+            foreach_sta_txq_safe(vif->sta.ap, txq, tid, vif->aml_hw) {
+                if ((txq) && (txq->status & AML_TXQ_STOP_CSA)) {
+                    trigger = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (((aml_partner_cust == ROKU_DONGLE_VER) || (aml_partner_cust == ROKU_TV_VER))
+        && (AML_VIF_TYPE(vif) ==  NL80211_IFTYPE_P2P_GO)) {
+        if (!list_empty(&vif->ap.sta_list)) {
+            struct aml_sta *sta, *tmp;
+            list_for_each_entry_safe(sta, tmp, &vif->ap.sta_list, list) {
+                if (sta->valid) {
+                    foreach_sta_txq_safe(sta, txq, tid, vif->aml_hw) {
+                        if ((txq) && (txq->status & AML_TXQ_STOP_STA_PS)) {
+                            trigger = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (trigger)
+        aml_recy_trigger(vif->aml_hw, RECY_REASON_CODE_TX_TIMEOUT);
 #endif
+}
+
 static bool aml_txq_drop_ap_vif_old_traffic(struct aml_vif *vif)
 {
     struct aml_sta *sta, *tmp;
     unsigned long timeout = (((unsigned long)vif->ap.bcn_interval) * HZ * 3) >> 10;
     bool pkt_queued = false;
     bool pkt_dropped = false;
-#ifdef CONFIG_AML_RECOVERY
-    struct aml_wq *aml_wq;
-    enum aml_wq_type type = AML_WQ_RECY;
-#endif
 
     // Should never be needed but still check VIF queues
     aml_txq_drop_old_traffic(aml_txq_vif_get(vif, NX_BCMC_TXQ_TYPE),
@@ -709,38 +731,8 @@ static bool aml_txq_drop_ap_vif_old_traffic(struct aml_vif *vif)
     aml_txq_drop_old_traffic(aml_txq_vif_get(vif, NX_UNK_TXQ_TYPE),
                               vif->aml_hw, AML_TXQ_MAX_QUEUE_JIFFIES, &pkt_dropped);
 
-    if (pkt_dropped) {
-        struct aml_wq *aml_wq;
-        netdev_warn(vif->ndev, "Dropped packet in BCMC/UNK queue");
-        aml_wq = aml_wq_alloc(sizeof(struct aml_vif));
-        if (!aml_wq) {
-            AML_INFO("alloc workqueue out of memory");
-        }
-        else
-        {
-            aml_wq->id = AML_WQ_SHOW_TX_MSG;
-            memcpy(aml_wq->data, vif, sizeof(struct aml_vif));
-            aml_wq_add(vif->aml_hw, aml_wq);
-        }
-
-#ifdef CONFIG_AML_RECOVERY
-        spin_lock_bh(&aml_recy->aml_hw->cmd_mgr.lock);
-        if (aml_bus_type != USB_MODE) {
-            if (!aml_recy->reason) {
-                aml_wq = aml_wq_alloc(1);
-                if (!aml_wq) {
-                    AML_INFO("alloc wq out of memory");
-                } else {
-                    aml_recy->reason = RECY_REASON_CODE_TX_TIMEOUT;
-                    aml_wq->id = AML_WQ_RECY;
-                    memcpy(aml_wq->data, &type, 1);
-                    aml_wq_add(aml_recy->aml_hw, aml_wq);
-               }
-            }
-        }
-        spin_unlock_bh(&aml_recy->aml_hw->cmd_mgr.lock);
-#endif
-    }
+    if (pkt_dropped)
+        aml_txq_drop_dump(vif, "BCMC/UNK");
 
     /* protect union struct vif->ap.sta_list was overwritten
      * by vif->sta.ap = NULL when aml_cfg80211_change_iface
@@ -748,7 +740,7 @@ static bool aml_txq_drop_ap_vif_old_traffic(struct aml_vif *vif)
     spin_lock_bh(&vif->vif_lock);
     if (vif->ap.sta_list.next) {
         list_for_each_entry_safe(sta, tmp, &vif->ap.sta_list, list) {
-            struct aml_txq *txq;
+            struct aml_txq *txq = NULL;
             int tid;
             foreach_sta_txq_safe(sta, txq, tid, vif->aml_hw) {
                 pkt_queued |= aml_txq_drop_old_traffic(txq, vif->aml_hw,
@@ -758,6 +750,7 @@ static bool aml_txq_drop_ap_vif_old_traffic(struct aml_vif *vif)
         }
     }
     spin_unlock_bh(&vif->vif_lock);
+
     return pkt_queued;
 }
 
@@ -774,10 +767,6 @@ static bool aml_txq_drop_sta_vif_old_traffic(struct aml_vif *vif)
     struct aml_txq *txq;
     bool pkt_queued = false, pkt_dropped = false;
     int tid;
-#ifdef CONFIG_AML_RECOVERY
-    struct aml_wq *aml_wq;
-    enum aml_wq_type type = AML_WQ_RECY;
-#endif
 
     if (vif->tdls_status == TDLS_LINK_ACTIVE) {
         txq = aml_txq_vif_get(vif, NX_UNK_TXQ_TYPE);
@@ -801,37 +790,9 @@ static bool aml_txq_drop_sta_vif_old_traffic(struct aml_vif *vif)
     }
     spin_unlock_bh(&vif->vif_lock);
 
-    if (pkt_dropped) {
-        struct aml_wq *aml_wq;
-        netdev_warn(vif->ndev, "Dropped packet in STA interface TXQs");
-        aml_wq = aml_wq_alloc(sizeof(struct aml_vif));
-        if (!aml_wq) {
-            AML_INFO("alloc workqueue out of memory");
-        }
-        else
-        {
-            aml_wq->id = AML_WQ_SHOW_TX_MSG;
-            memcpy(aml_wq->data, vif, sizeof(struct aml_vif));
-            aml_wq_add(vif->aml_hw, aml_wq);
-        }
-#ifdef CONFIG_AML_RECOVERY
-        spin_lock_bh(&aml_recy->aml_hw->cmd_mgr.lock);
-        if (aml_bus_type != USB_MODE) {
-            if (!aml_recy->reason) {
-                aml_wq = aml_wq_alloc(1);
-                if (!aml_wq) {
-                    AML_INFO("alloc wq out of memory");
-                } else {
-                    aml_recy->reason = RECY_REASON_CODE_TX_TIMEOUT;
-                    aml_wq->id = AML_WQ_RECY;
-                    memcpy(aml_wq->data, &type, 1);
-                    aml_wq_add(aml_recy->aml_hw, aml_wq);
-               }
-            }
-        }
-        spin_unlock_bh(&aml_recy->aml_hw->cmd_mgr.lock);
-#endif
-    }
+    if (pkt_dropped)
+        aml_txq_drop_dump(vif, "STA interface");
+
     return pkt_queued;
 }
 
@@ -899,11 +860,7 @@ void aml_txq_prepare(struct aml_hw *aml_hw)
     int i;
 
     for (i = 0; i < NX_NB_TXQ; i++) {
-#ifdef CONFIG_AML_PREALLOC_BUF_STATIC
-        (aml_hw->txq + i)->idx = TXQ_INACTIVE;
-#else
         aml_hw->txq[i].idx = TXQ_INACTIVE;
-#endif
     }
 
     timer_setup(&aml_hw->txq_cleanup, aml_txq_cleanup_timer_cb, 0);
@@ -1037,7 +994,7 @@ void aml_txq_sta_start(struct aml_sta *aml_sta, u16 reason
 #endif
                         )
 {
-    struct aml_txq *txq;
+    struct aml_txq *txq = NULL;
     int tid;
 
     trace_txq_sta_start(aml_sta->sta_idx);
@@ -1070,7 +1027,7 @@ void aml_txq_sta_stop(struct aml_sta *aml_sta, u16 reason
 #endif
                        )
 {
-    struct aml_txq *txq;
+    struct aml_txq *txq = NULL;
     int tid;
 
     if (!aml_sta)
@@ -1161,6 +1118,7 @@ void aml_txq_vif_for_each_sta(struct aml_hw *aml_hw, struct aml_vif *aml_vif,
     }
     case NL80211_IFTYPE_AP_VLAN:
         aml_vif = aml_vif->ap_vlan.master;
+        fallthrough;
     case NL80211_IFTYPE_AP:
     case NL80211_IFTYPE_MESH_POINT:
     case NL80211_IFTYPE_P2P_GO:
@@ -1303,12 +1261,8 @@ end:
  */
 void aml_txq_offchan_start(struct aml_hw *aml_hw)
 {
-    struct aml_txq *txq;
-#ifdef CONFIG_AML_PREALLOC_BUF_STATIC
-    txq = aml_hw->txq + NX_OFF_CHAN_TXQ_IDX;
-#else
-    txq = &aml_hw->txq[NX_OFF_CHAN_TXQ_IDX];
-#endif
+    struct aml_txq *txq = &aml_hw->txq[NX_OFF_CHAN_TXQ_IDX];
+
     spin_lock_bh(&aml_hw->tx_lock);
     aml_txq_start(txq, AML_TXQ_STOP_CHAN);
     spin_unlock_bh(&aml_hw->tx_lock);
@@ -1626,7 +1580,7 @@ static bool aml_txq_mac80211_dequeue(struct aml_hw *aml_hw,
  * @aml_hw: main driver data
  * @hwq: HWQ on which buffers will be pushed
  * @txq: TXQ to get buffers from
- * @user: user postion to use
+ * @user: user position to use
  * @sk_list_push: list to update
  *
  *
@@ -1973,7 +1927,7 @@ void aml_hwq_init(struct aml_hw *aml_hw)
 
 int aml_txq_is_empty(struct aml_vif *aml_vif, struct aml_sta *aml_sta)
 {
-    struct aml_txq *txq;
+    struct aml_txq *txq = NULL;
     int tid;
     int i;
 
@@ -1999,6 +1953,22 @@ int aml_unktxq_is_empty(struct aml_vif *aml_vif)
         return 1;
     }
     txq = aml_txq_vif_get(aml_vif, NX_UNK_TXQ_TYPE);
+    for (i = 0; i < CONFIG_USER_MAX ; i++) {
+        if (txq->pkt_pushed[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int aml_bcmctxq_is_empty(struct aml_vif *aml_vif)
+{
+    int i;
+    struct aml_txq *txq;
+    if (!aml_vif) {
+        return 1;
+    }
+    txq = aml_txq_vif_get(aml_vif, NX_BCMC_TXQ_TYPE);
     for (i = 0; i < CONFIG_USER_MAX ; i++) {
         if (txq->pkt_pushed[i]) {
             return 0;

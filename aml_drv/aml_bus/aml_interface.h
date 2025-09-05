@@ -1,5 +1,23 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
 #ifndef _AML_INTERFACE_H_
 #define _AML_INTERFACE_H_
+
+#include <linux/version.h>
+#include <linux/atomic.h>
+#include <linux/timer.h>
+#include <linux/workqueue.h>
+
+/* for sched_clock() */
+#include <linux/sched.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#include <linux/sched/clock.h>
+#endif
 
 #define AML_SDIO_STATE_MON_INTERVAL   (5 *HZ)
 #define ICCM_RAM_LEN (192 * 1024)
@@ -28,11 +46,15 @@ enum interface_type {
 
 enum custom_version {
     DEFAULT_VER,
-    ROKU_VER
+    ROKU_DONGLE_VER,
+    ROKU_TV_VER,
+    TCL_TV_VER
 };
 
+//bt should synchronous editing
 struct aml_bus_state_detect {
   unsigned char bus_err;
+  unsigned char usb_disconnect;
   unsigned char is_drv_load_finished;
   unsigned char bus_reset_ongoing;
   unsigned char is_load_by_timer;
@@ -40,7 +62,16 @@ struct aml_bus_state_detect {
   struct timer_list timer;
   struct work_struct detect_work;
   int (*insmod_drv)(void);
+  unsigned char usb_suspend;
+
+#ifdef CONFIG_USB_HOTPLUG
+  unsigned char usb_unplug;
+  void (*auc_wifi_enable_func)(void);
+  void (*auc_wifi_disable_func)(void);
+#endif
 };
+
+extern struct aml_bus_state_detect bus_state_detect;
 
 struct aml_pm_type {
     atomic_t bus_suspend_cnt;
@@ -49,6 +80,19 @@ struct aml_pm_type {
     atomic_t wifi_enable;
 };
 
+extern struct aml_pm_type g_wifi_pm;
+extern struct wakeup_source *aml_wifi_wakeup_source;
+extern unsigned int aml_partner_cust;
+
 typedef void (*bt_shutdown_func)(void);
 typedef void (*lp_shutdown_func)(void);
+
+void aml_wifi_power_on(int on);
+
+#ifdef SDIO_MODE_ON
+void aml_wifi_32k_power_on(int on);
+#endif
+
+void aml_bus_state_detect_deinit(void);
+
 #endif

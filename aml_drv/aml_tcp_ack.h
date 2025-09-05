@@ -16,8 +16,7 @@
 
 #define AML_TCP_SESS_NUM  128
 #define MAX_TCP_ACK_LEN 200
-#define MAX_DROP_TCP_ACK_CNT  8
-#define MAX_DROP_TCP_ACK_CNT_USB  10
+#define MAX_DROP_TCP_ACK_CNT  5
 #define TCK_SESS_TIMEOUT_TIME 1000
 #define MAX_TCP_ACK_TIMEOUT 30 //ms
 #define MAX_TCP_SESS_LEVEL1 5
@@ -62,9 +61,14 @@ struct aml_tcp_sess_info {
     struct aml_pkt_info pkt_info;
 };
 
+#define FORCE_DELAY_ACK_AUTO 2
+#define FORCE_DELAY_ACK_DISABLE 0
+#define FORCE_DELAY_ACK_ENABLE 1
+
 struct aml_tcp_sess_mgr {
     atomic_t enable;
     atomic_t dynamic_adjust;
+    atomic_t force_delay_ack;
     int used_num;
     int free_index;
     u32 total_drop_cnt;
@@ -89,6 +93,6 @@ void aml_tcp_delay_ack_deinit(struct aml_hw *aml_hw);
 void aml_tcp_delay_ack_init(struct aml_hw *aml_hw);
 int aml_filter_tx_tcp_ack(struct net_device *dev, struct sk_buff *skb, struct aml_sta *sta);
 void aml_check_tcpack_skb(struct aml_hw *aml_hw, struct sk_buff *skb, u32 len);
-int aml_set_tcp_ack_accord_to_rssi(struct aml_sta *sta, struct aml_hw *aml_hw, s32_l rssi);
+void aml_set_tcp_ack_auto(struct aml_hw *aml_hw);
 
 #endif

@@ -80,8 +80,8 @@ void aml_mu_group_sta_del(struct aml_hw *aml_hw, struct aml_sta *sta)
             }
         }
 
-        WARN((i == CONFIG_USER_MAX), "sta %d doesn't belongs to group %d",
-            sta->sta_idx, group_id);
+        if (i == CONFIG_USER_MAX)
+            AML_ERR("sta %d doesn't belongs to group %d", sta->sta_idx, group_id);
     }
 
     sta->group_info.map = 0;
@@ -119,7 +119,7 @@ u64 aml_mu_group_sta_get_map(struct aml_sta *sta)
  * @sta: pointer to the sta
  * @group_id: Group id
  *
- * @return the positon of @sta in group @group_id or -1 if the sta
+ * @return the positron of @sta in group @group_id or -1 if the sta
  * doesn't belongs to the group (or group id is invalid)
  */
 int aml_mu_group_sta_get_pos(struct aml_hw *aml_hw, struct aml_sta *sta,
@@ -137,8 +137,8 @@ int aml_mu_group_sta_get_pos(struct aml_hw *aml_hw, struct aml_sta *sta,
             return i;
     }
 
-    WARN(1, "sta %d doesn't belongs to group %d",
-         sta->sta_idx, group_id);
+    AML_ERR("sta %d doesn't belongs to group %d", sta->sta_idx, group_id);
+
     return -1;
 }
 
@@ -233,9 +233,9 @@ void aml_mu_group_add_users(struct aml_mu_info *mu,
                 break;
             }
 
-            WARN(j == (CONFIG_USER_MAX - 1),
-                 "Too many user for group %d (nb_user=%d)",
-                 group_id, group->user_cnt + nb_user - i);
+            if (j == (CONFIG_USER_MAX - 1))
+                AML_INFO("Too many user for group %d (nb_user=%d)",
+                    group_id, group->user_cnt + nb_user - i);
         }
     }
 
@@ -418,9 +418,10 @@ void aml_mu_group_work(struct work_struct *ws)
     struct aml_sta *sta, *next;
     int nb_group_left = NX_MU_GROUP_MAX;
 
-    if (WARN(!aml_hw->mod_params->mutx,
-             "In group formation work, but mutx disabled"))
+    if (!aml_hw->mod_params->mutx) {
+        AML_ERR("In group formation work, but mutx disabled");
         return;
+    }
 
     if (down_interruptible(&mu->lock) != 0)
         return;

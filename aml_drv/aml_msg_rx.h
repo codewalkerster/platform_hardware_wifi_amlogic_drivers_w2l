@@ -13,6 +13,8 @@
 #ifndef _AML_MSG_RX_H_
 #define _AML_MSG_RX_H_
 
+#define MAC_RS_LINK_LOSS_DISCONNECT              40
+
 struct aml_ft_auth_timeout {
     uint8_t vif_idx;
 };

@@ -124,7 +124,7 @@ static int aml_pci_suspend(struct pci_dev *pdev, pm_message_t state)
 
     ret = pci_set_power_state(pdev, PCI_D3hot);
     if (ret) {
-        ERROR_DEBUG_OUT("pci_set_power_state error %d\n", ret);
+        AML_ERR("pci_set_power_state error %d\n", ret);
     }
 
     //Delay 100ms to ensure ltssm enters L1 completion, delaying PCIe PHY power-off.
@@ -145,7 +145,7 @@ static int aml_pci_resume(struct pci_dev *pdev)
     pci_set_master(pdev);
     err = pci_set_power_state(pdev, PCI_D0);
     if (err) {
-        ERROR_DEBUG_OUT("pci_set_power_state error %d \n", err);
+        AML_ERR("pci_set_power_state error %d \n", err);
         goto out;
     }
     wake_flag = aml_pci_read_for_bt(AML_ADDR_AON, RG_AON_A25);
@@ -154,7 +154,7 @@ static int aml_pci_resume(struct pci_dev *pdev)
     {
         err = pci_set_power_state(pdev, PCI_D0);
         if (err) {
-            ERROR_DEBUG_OUT("pci_set_power_state error %d \n", err);
+            AML_ERR("pci_set_power_state error %d \n", err);
             goto out;
         }
         wake_flag = aml_pci_read_for_bt(AML_ADDR_AON, RG_AON_A25);
@@ -195,11 +195,13 @@ static void aml_pci_shutdown(struct pci_dev *pdev)
     aml_pci_write_for_bt(aml_pci_read_for_bt(AML_ADDR_AON, RG_AON_A16) | BIT(28), AML_ADDR_AON, RG_AON_A16);
     g_pci_shutdown = 1;
 
+#ifdef CONFIG_PCI_MSI
     if (pci_is_enabled(pdev))
     {
         msleep(100);
         pci_disable_device(pdev);
     }
+#endif
     AML_FN_EXIT();
 }
 

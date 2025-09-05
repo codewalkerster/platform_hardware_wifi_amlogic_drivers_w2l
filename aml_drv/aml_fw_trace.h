@@ -20,6 +20,10 @@
 #define TRACE_LEVEL_READ         1
 #define TRACE_LEVEL_WRITE        0
 
+#define MAX_PARAM_LEN (1824)
+
+struct aml_hw;
+
 /**
  * struct aml_fw_trace_desc - Trace buffer info as provided by fw in ipc
  *
@@ -122,9 +126,11 @@ struct aml_fw_trace {
 
 struct log_file_info {
     uint8_t *log_buf;
-    uint8_t *ptr;
+    uint16_t *ptr;
     uint8_t *fail_buf;
+    uint8_t *assert_ptr;
     uint32_t len;
+    unsigned int flag_end;
     struct mutex mutex;
 };
 
@@ -134,6 +140,7 @@ enum {
     AML_TRACE_FW_LOG_UPLOAD,
     AML_LA_MACTRACE_UPLOAD,
     AML_MEM_DUMP_UPLOAD,
+    AML_CLOSE_NETLINK_SOCKET,
 };
 
 struct log_nl_msg_info {
@@ -145,6 +152,7 @@ struct aml_trace_nl_info {
     struct sock * fw_log_sock;
     int user_pid;
     int enable;
+    int fail_count;
 };
 
 int aml_fw_trace_init(struct aml_fw_trace *trace,
@@ -155,7 +163,7 @@ int aml_fw_trace_buf_init(struct aml_fw_trace_buf *shared_buf,
                            struct aml_fw_trace_ipc_desc *ipc);
 
 int _aml_fw_trace_reset(struct aml_fw_trace *trace, bool lock);
-void _aml_fw_trace_dump(struct aml_hw *aml_hw, struct aml_fw_trace_buf *trace);
+void _aml_fw_trace_dump(struct aml_fw_trace_buf *trace);
 
 int aml_fw_trace_alloc_local(struct aml_fw_trace_local_buf *local,
                               int size);
@@ -181,8 +189,9 @@ int aml_fw_trace_restore_filters(struct aml_fw_trace *trace);
 int aml_log_file_info_init(int mode);
 int aml_trace_log_to_file(uint16_t *trace, uint16_t *trace_limit);
 void aml_send_err_info_to_diag(char *pbuf, int len);
-int aml_send_log_to_user(char *pbuf, uint16_t len, int msg_type);
-int aml_trace_buf_init(void);
+
+uint8_t aml_get_dbg_trace_data(struct aml_hw *aml_hw);
+uint8_t get_dccm_data(uint16_t *ptr_start, uint16_t *ptr_end);
 
 /**
  * aml_fw_trace_empty() - Check if shared buffer is empty
@@ -195,5 +204,9 @@ static inline bool aml_fw_trace_empty(struct aml_fw_trace_buf *shared_buf)
 }
 int aml_log_nl_init(void);
 void aml_log_nl_destroy(void);
+int aml_send_log_to_user(char *pbuf, int len, int msg_type);
+
+int aml_trace_buf_init(void);
+void aml_trace_buf_deinit(void);
 
 #endif /* _AML_FW_TRACE_H_ */

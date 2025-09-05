@@ -1,3 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
 #ifndef _W2_SDIO_H_
 #define _W2_SDIO_H_
 #include "sdio_common.h"
@@ -26,10 +33,6 @@
 #define FUNC4_BLKSIZE 512
 #define SDIO_CCCR_IOABORT 6
 
-#define MAC_ICCM_AHB_BASE    0x00000000
-#define MAC_REG_BASE         0x00a00000
-#define MAC_DCCM_AHB_BASE    0x00d00000
-
 #ifdef CONFIG_PT_MODE
     #define SRAM_MAX_LEN (1024 * 64)
 #else
@@ -40,14 +43,6 @@
 #define WIFI_SDIO_IF    (0xa05000)
 /*BIT(0): TX DONE intr, BIT(1): RX DONE intr*/
 #define RG_SDIO_IF_INTR2CPU_ENABLE    (WIFI_SDIO_IF+0x30)
-
-#if 0
-#define WIFI_SUSPEND_CODE_ADDR (0x060070000)
-#define WIFI_SUSPEND_CODE_LEN (21668)
-#else
-#define WIFI_SUSPEND_CODE_ADDR (0x000064000)
-#define WIFI_SUSPEND_CODE_LEN (49152)
-#endif
 
 extern uint8_t *g_mmc_misc;
 extern struct aml_hwif_sdio g_hwif_rx_sdio;
@@ -85,10 +80,10 @@ struct aml_hif_sdio_ops {
     void (*hi_tx_buffer_read)(unsigned char *buf, unsigned char *addr, size_t len);
 
     //sdio func5 for rxdesc
-    void (*hi_desc_read)(unsigned char *buf, unsigned char *addr, size_t len);
+    int (*hi_desc_read)(void *buf, u32 addr, size_t len);
 
     //sdio func6 for rx buffer
-    void (*hi_rx_buffer_read)(unsigned char* buf, unsigned char* addr, size_t len, unsigned char scat_use);
+    int (*hi_rx_buffer_read)(void *buf, u32 addr, unsigned int len, unsigned int unused);
 
     //scatter list operation
     int (*hi_enable_scat)(struct aml_hwif_sdio *hif_sdio);
@@ -114,7 +109,8 @@ extern struct aml_hif_sdio_ops g_hif_sdio_ops;
 extern unsigned char g_sdio_driver_insmoded;
 
 unsigned char aml_download_wifi_fw_img(char *firmware_filename);
-unsigned char aml_sdio_download_suspend_or_rf_fw(unsigned char fw_type);
+unsigned char aml_sdio_download_suspend_or_rf_fw(unsigned char fw_type, unsigned int fw_download_timeout);
+unsigned char aml_sdio_download_host_cmd_fw(unsigned char cmd_index);
 
 int aml_sdio_scat_req_rw(struct amlw_hif_scatter_req *scat_req);
 void aml_sdio_init_base_addr(void);

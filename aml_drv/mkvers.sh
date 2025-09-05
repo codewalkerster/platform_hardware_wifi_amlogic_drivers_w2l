@@ -1,5 +1,12 @@
 #!/bin/bash
 #
+# SPDX-License-Identifier: GPL-2.0 */
+#
+#Copyright (C) 202X Original Author (retain original author information)
+#Copyright (C) 202X Amlogic, Inc. All rights reserved.
+#
+#Description:
+#
 # Outputs svn revision of directory $VERDIR into $TARGET if it changes $TARGET
 # example output omitting enclosing quotes:
 #
@@ -15,7 +22,7 @@ VERDIR=$(dirname $(readlink -f $0))
 TARGET=$1
 
 DATE_FORMAT1="%b %d %Y %T"
-DATE_FORMAT="W2.%Y.W%02W.%02w"
+DATE_FORMAT="W2l.%Y.W%02W.%02w"
 AML_VERS_MOD=$(grep AML_VERS_NUM $VERDIR/Makefile | cut -f2 -d= | sed 's/\s\+$//')
 tmpout=$TARGET.tmp
 cd $VERDIR
@@ -98,7 +105,7 @@ date1=$(LC_TIME=C date +"$DATE_FORMAT1")
 
 AML_VERS_REV="$svnrev"
 #      "lmac vX.X.X.X - build:"
-banner="$date ($date1 - driver:$AML_VERS_REV)"
+banner="$date ($date1 - driver:$AML_VERS_REV - fw:)"
 
 define() { echo "#define $1 \"$2\""; }
 {

@@ -191,8 +191,8 @@
 #define RIU_AMLAGCCNTL_ADDR           0x00C0B390
 
 /* Cataxia Radio Controller */
-#define RC_SYSTEM_CONFIGURATION_ADDR   0x00C0C000
-#define RC_ACCES_TO_CATAXIA_REG_ADDR   0x00C0C004
+#define RC_SYSTEM_CONFIGURATION_ADDR    0x00C0C000
+#define RC_ACCESS_TO_CATAXIA_REG_ADDR   0x00C0C004
 
 /* RF ITF */
 #if 0 //old pcie
@@ -217,7 +217,9 @@ extern unsigned char g_pci_shutdown;
 
 __INLINE u32 reg_ipc_app_rd(void *env, unsigned int INDEX)
 {
+#ifdef SDIO_MODE_ON
     struct aml_hw *aml_hw = (struct aml_hw *)env;
+#endif
 
     if (aml_bus_type == USB_MODE) {
         return (((struct aml_hw *)env)->plat->hif_ops->hi_read_word((unsigned long)ipc_basic_address + 4 * (INDEX), USB_EP4));
@@ -232,7 +234,9 @@ __INLINE u32 reg_ipc_app_rd(void *env, unsigned int INDEX)
 
 __INLINE void reg_ipc_app_wr(void *env, unsigned int INDEX, u32 value)
 {
+#ifdef SDIO_MODE_ON
     struct aml_hw *aml_hw = (struct aml_hw *)env;
+#endif
 
     if (aml_bus_type == USB_MODE) {
         (((struct aml_hw *)env)->plat->hif_ops->hi_write_word((unsigned long)ipc_basic_address + 4 * (INDEX), value, USB_EP4));

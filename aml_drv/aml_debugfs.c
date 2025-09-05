@@ -22,6 +22,8 @@
 #include "aml_msg_tx.h"
 #include "aml_radar.h"
 #include "aml_tx.h"
+#include "aml_rate.h"
+#include "aml_defs.h"
 
 extern int aml_set_fwlog_cmd(struct net_device *dev, int mode);
 
@@ -337,7 +339,7 @@ int aml_dbgfs_txq_sta(char *buf, size_t size, struct aml_sta *aml_sta,
                               struct aml_hw *aml_hw)
 {
     int tid, res, idx = 0;
-    struct aml_txq *txq;
+    struct aml_txq *txq = NULL;
 #ifdef CONFIG_AML_SOFTMAC
     struct ieee80211_sta *sta = aml_to_ieee80211_sta(aml_sta);
 #endif /* CONFIG_AML_SOFTMAC */
@@ -403,12 +405,12 @@ int aml_dbgfs_txq_vif(char *buf, size_t size, struct aml_vif *aml_vif,
     struct aml_sta *aml_sta, *tmp;
 
 #ifdef CONFIG_AML_FULLMAC
-    res = scnprintf(&buf[idx], size, VIF_HDR, aml_vif->vif_index, aml_vif->ndev->name);
-    idx += res;
-    size -= res;
     if (!aml_vif->up || aml_vif->ndev == NULL)
         return idx;
 
+    res = scnprintf(&buf[idx], size, VIF_HDR, aml_vif->vif_index, aml_vif->ndev->name);
+    idx += res;
+    size -= res;
 #else
     int ac;
     char ac_name[2] = {'0', '\0'};
@@ -607,7 +609,7 @@ static ssize_t aml_dbgfs_fw_dbg_write(struct file *file,
                                             size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int idx = 0;
     u32 mod = 0;
     size_t len = min_t(size_t, count, sizeof(buf) - 1);
@@ -681,7 +683,7 @@ static ssize_t aml_dbgfs_sys_stats_read(struct file *file,
                                          size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[3*64];
+    char buf[3*64] = {};
     int len = 0;
     ssize_t read;
     int error = 0;
@@ -698,17 +700,17 @@ static ssize_t aml_dbgfs_sys_stats_read(struct file *file,
     if (cfm.stats_time == 0)
         return 0;
 
-    sleep_int = div_u64_rem(cfm.cpu_sleep_time * 100, cfm.stats_time, &rem);
+    sleep_int = div_u64_rem((u64)cfm.cpu_sleep_time * 100, cfm.stats_time, &rem);
     sleep_frac = div_u64(rem * 10,  cfm.stats_time);
-    doze_int = div_u64_rem(cfm.doze_time * 100, cfm.stats_time, &rem);
+    doze_int = div_u64_rem((u64)cfm.doze_time * 100, cfm.stats_time, &rem);
     doze_frac = div_u64(rem * 10, cfm.stats_time);
 
     len += scnprintf(buf, min_t(size_t, sizeof(buf) - 1, count),
                      "\nSystem statistics:\n");
     len += scnprintf(&buf[len], min_t(size_t, sizeof(buf) - 1, count),
-                     "  CPU sleep [%%]: %d.%d\n", sleep_int, sleep_frac);
+                     "  CPU sleep [%%]: %lld.%lld\n", sleep_int, sleep_frac);
     len += scnprintf(&buf[len], min_t(size_t, sizeof(buf) - 1, count),
-                     "  Doze      [%%]: %d.%d\n", doze_int, doze_frac);
+                     "  Doze      [%%]: %lld.%lld\n", doze_int, doze_frac);
 
     read = simple_read_from_buffer(user_buf, count, ppos, buf, len);
 
@@ -784,7 +786,7 @@ static ssize_t aml_dbgfs_oppps_write(struct file *file,
 {
     struct aml_hw *rw_hw = file->private_data;
     struct aml_vif *rw_vif;
-    char buf[32];
+    char buf[32] = {};
     size_t len = min_t(size_t, count, sizeof(buf) - 1);
     int ctw;
 
@@ -822,7 +824,7 @@ static ssize_t aml_dbgfs_noa_write(struct file *file,
 {
     struct aml_hw *rw_hw = file->private_data;
     struct aml_vif *rw_vif;
-    char buf[64];
+    char buf[64] = {};
     size_t len = min_t(size_t, count, sizeof(buf) - 1);
     int noa_count, interval, duration, dyn_noa;
 
@@ -1076,13 +1078,15 @@ static ssize_t aml_dbgfs_enable_read(struct file *file,
                                     size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int ret;
     ssize_t read;
 
+    spin_lock_bh(&priv->radar.lock);
     ret = scnprintf(buf, min_t(size_t, sizeof(buf) - 1, count),
                     "RIU=%d FCU=%d\n", priv->radar.dpd[AML_RADAR_RIU]->enabled,
                     priv->radar.dpd[AML_RADAR_FCU]->enabled);
+    spin_unlock_bh(&priv->radar.lock);
 
     read = simple_read_from_buffer(user_buf, count, ppos, buf, ret);
 
@@ -1094,7 +1098,7 @@ static ssize_t aml_dbgfs_enable_write(struct file *file,
                                      size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int val;
     size_t len = min_t(size_t, count, sizeof(buf) - 1);
 
@@ -1119,7 +1123,7 @@ static ssize_t aml_dbgfs_band_read(struct file *file,
                                     size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int ret;
     ssize_t read;
 
@@ -1136,7 +1140,7 @@ static ssize_t aml_dbgfs_band_write(struct file *file,
                                      size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int val;
     size_t len = min_t(size_t, count, sizeof(buf) - 1);
 
@@ -1158,7 +1162,7 @@ static ssize_t aml_dbgfs_type_read(struct file *file,
                                     size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int ret;
     ssize_t read;
 
@@ -1175,7 +1179,7 @@ static ssize_t aml_dbgfs_type_write(struct file *file,
                                      size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int val;
     size_t len = min_t(size_t, count, sizeof(buf) - 1);
 
@@ -1198,7 +1202,7 @@ static ssize_t aml_dbgfs_prim20_read(struct file *file,
                                       size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int ret;
     ssize_t read;
 
@@ -1215,7 +1219,7 @@ static ssize_t aml_dbgfs_prim20_write(struct file *file,
                                        size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int val;
     size_t len = min_t(size_t, count, sizeof(buf) - 1);
 
@@ -1237,7 +1241,7 @@ static ssize_t aml_dbgfs_center1_read(struct file *file,
                                        size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int ret;
     ssize_t read;
 
@@ -1254,7 +1258,7 @@ static ssize_t aml_dbgfs_center1_write(struct file *file,
                                         size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int val;
     size_t len = min_t(size_t, count, sizeof(buf) - 1);
 
@@ -1276,7 +1280,7 @@ static ssize_t aml_dbgfs_center2_read(struct file *file,
                                        size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int ret;
     ssize_t read;
 
@@ -1293,7 +1297,7 @@ static ssize_t aml_dbgfs_center2_write(struct file *file,
                                         size_t count, loff_t *ppos)
 {
     struct aml_hw *priv = file->private_data;
-    char buf[32];
+    char buf[32] = {};
     int val;
     size_t len = min_t(size_t, count, sizeof(buf) - 1);
 
@@ -1336,281 +1340,6 @@ DEBUGFS_READ_WRITE_FILE_OPS(set);
 
 #ifdef CONFIG_AML_FULLMAC
 
-static const int ru_size_he_er[] =
-{
-    242,
-    106
-};
-
-static const int ru_size_he_mu[] =
-{
-    26,
-    52,
-    106,
-    242,
-    484,
-    996
-};
-
-#ifdef CONFIG_AML_DEBUGFS
-int compare_idx(const void *st1, const void *st2)
-{
-    int index1 = ((struct st *)st1)->r_idx;
-    int index2 = ((struct st *)st2)->r_idx;
-
-    if (index1 > index2) return 1;
-    if (index1 < index2) return -1;
-
-    return 0;
-}
-
-int print_rate(char *buf, int size, int format, int nss, int mcs, int bw,
-                      int sgi, int pre, int dcm, int *r_idx, bool bprint)
-{
-    int res = 0;
-    int bitrates_cck[4] = { 10, 20, 55, 110 };
-    int bitrates_ofdm[8] = { 6, 9, 12, 18, 24, 36, 48, 54};
-    char he_gi[3][4] = {"0.8", "1.6", "3.2"};
-
-    if (format < FORMATMOD_HT_MF) {
-        if (mcs < 4) {
-            if (r_idx) {
-                *r_idx = (mcs * 2) + pre;
-                if (bprint) {
-                    printk("%4d ", *r_idx);
-                } else {
-                    res = scnprintf(buf, size - res, "%4d ", *r_idx);
-                }
-            }
-            if (bprint) {
-                printk("L-CCK/%cP%11c%2u.%1uM   ", pre > 0 ? 'L' : 'S', ' ', bitrates_cck[mcs] / 10, bitrates_cck[mcs] % 10);
-            } else {
-                res += scnprintf(&buf[res], size - res, "L-CCK/%cP%11c%2u.%1uM   ",
-                                 pre > 0 ? 'L' : 'S', ' ',
-                                 bitrates_cck[mcs] / 10,
-                                 bitrates_cck[mcs] % 10);
-            }
-        } else {
-            mcs -= 4;
-            if (r_idx) {
-                *r_idx = N_CCK + mcs;
-                if (bprint) {
-                    printk("%4d ", *r_idx);
-                } else {
-                    res = scnprintf(buf, size - res, "%4d ", *r_idx);
-                }
-            }
-            if (bprint) {
-                printk("L-OFDM%13c%2u.0M   ", ' ', bitrates_ofdm[mcs]);
-            } else {
-                res += scnprintf(&buf[res], size - res, "L-OFDM%13c%2u.0M   ",
-                                 ' ', bitrates_ofdm[mcs]);
-            }
-        }
-    } else if (format < FORMATMOD_VHT) {
-        if (r_idx) {
-            *r_idx = N_CCK + N_OFDM + nss * 32 + mcs * 4 + bw * 2 + sgi;
-            if (bprint) {
-                printk("%4d ", *r_idx);
-            } else {
-                res = scnprintf(buf, size - res, "%4d ", *r_idx);
-            }
-        }
-        mcs += nss * 8;
-        if (bprint) {
-            printk("HT%d/%cGI%11cMCS%-2d   ", 20 * (1 << bw), sgi ? 'S' : 'L', ' ', mcs);
-        } else {
-            res += scnprintf(&buf[res], size - res, "HT%d/%cGI%11cMCS%-2d   ",
-                             20 * (1 << bw), sgi ? 'S' : 'L', ' ', mcs);
-        }
-    } else if (format == FORMATMOD_VHT){
-        if (r_idx) {
-            *r_idx = N_CCK + N_OFDM + N_HT + nss * 80 + mcs * 8 + bw * 2 + sgi;
-            if (bprint) {
-                printk("%4d ", *r_idx);
-            } else {
-                res = scnprintf(buf, size - res, "%4d ", *r_idx);
-            }
-        }
-        if (bprint) {
-            printk("VHT%d/%cGI%*cMCS%d/%1d  ", 20 * (1 << bw), sgi ? 'S' : 'L', bw > 2 ? 9 : 10, ' ',
-                     mcs, nss + 1);
-        } else {
-            res += scnprintf(&buf[res], size - res, "VHT%d/%cGI%*cMCS%d/%1d  ",
-                             20 * (1 << bw), sgi ? 'S' : 'L', bw > 2 ? 9 : 10, ' ',
-                             mcs, nss + 1);
-        }
-    } else if (format == FORMATMOD_HE_SU){
-        if (r_idx) {
-            *r_idx = N_CCK + N_OFDM + N_HT + N_VHT + nss * 144 + mcs * 12 + bw * 3 + sgi;
-            if (bprint) {
-                printk("%4d ", *r_idx);
-            } else {
-                res = scnprintf(buf, size - res, "%4d ", *r_idx);
-            }
-        }
-        if (bprint) {
-            printk("HE%d/GI%s%4s%*cMCS%d/%1d%*c",
-                    20 * (1 << bw), he_gi[sgi], dcm ? "/DCM" : "",
-                    bw > 2 ? 4 : 5, ' ', mcs, nss + 1, mcs > 9 ? 1 : 2, ' ');
-        } else {
-            res += scnprintf(&buf[res], size - res, "HE%d/GI%s%4s%*cMCS%d/%1d%*c",
-                             20 * (1 << bw), he_gi[sgi], dcm ? "/DCM" : "",
-                             bw > 2 ? 4 : 5, ' ', mcs, nss + 1, mcs > 9 ? 1 : 2, ' ');
-        }
-    } else if (format == FORMATMOD_HE_MU){
-        if (r_idx) {
-            *r_idx = N_CCK + N_OFDM + N_HT + N_VHT + N_HE_SU + nss * 216 + mcs * 18 + bw * 3 + sgi;
-            if (bprint) {
-                printk("%4d ", *r_idx);
-            } else {
-                res = scnprintf(buf, size - res, "%4d ", *r_idx);
-            }
-        }
-        if (bprint) {
-            printk("HEMU-%d/GI%s%*cMCS%d/%1d%*c",
-                     ru_size_he_mu[bw], he_gi[sgi], bw > 1 ? 5 : 6, ' ',
-                     mcs, nss + 1, mcs > 9 ? 1 : 2, ' ');
-        } else {
-            res += scnprintf(&buf[res], size - res, "HEMU-%d/GI%s%*cMCS%d/%1d%*c",
-                             ru_size_he_mu[bw], he_gi[sgi], bw > 1 ? 5 : 6, ' ',
-                             mcs, nss + 1, mcs > 9 ? 1 : 2, ' ');
-        }
-
-    }
-    else // HE ER
-    {
-        if (r_idx) {
-            *r_idx = N_CCK + N_OFDM + N_HT + N_VHT + N_HE_SU + N_HE_MU + bw * 9 + mcs * 3 + sgi;
-            if (bprint) {
-                printk("%4d ", *r_idx);
-            } else {
-                res = scnprintf(buf, size - res, "%4d ", *r_idx);
-            }
-        }
-        if (bprint) {
-            printk("HEER-%d/GI%s%4s%1cMCS%d/%1d%2c",
-                     ru_size_he_er[bw], he_gi[sgi], dcm ? "/DCM" : "",
-                     ' ', mcs, nss + 1, ' ');
-        } else {
-            res += scnprintf(&buf[res], size - res, "HEER-%d/GI%s%4s%1cMCS%d/%1d%2c",
-                             ru_size_he_er[bw], he_gi[sgi], dcm ? "/DCM" : "",
-                             ' ', mcs, nss + 1, ' ');
-        }
-    }
-
-    return res;
-}
-
-int print_rate_from_cfg(char *buf, int size, u32 rate_config, int *r_idx, int ru_size, bool bprint)
-{
-    union aml_rate_ctrl_info *r_cfg = (union aml_rate_ctrl_info *)&rate_config;
-    union aml_mcs_index *mcs_index = (union aml_mcs_index *)&rate_config;
-    unsigned int ft, pre, gi, bw, nss, mcs, dcm, len;
-
-    ft = r_cfg->formatModTx;
-    pre = r_cfg->giAndPreTypeTx >> 1;
-    gi = r_cfg->giAndPreTypeTx;
-    bw = r_cfg->bwTx;
-    dcm = 0;
-    if (ft >= FORMATMOD_HE_SU) {
-        mcs = mcs_index->he.mcs;
-        nss = mcs_index->he.nss;
-        dcm = r_cfg->dcmTx;
-        if (ft == FORMATMOD_HE_MU)
-            bw = ru_size > 3 ? ru_size - 3 : ru_size;
-    } else if (ft == FORMATMOD_VHT) {
-        mcs = mcs_index->vht.mcs;
-        nss = mcs_index->vht.nss;
-    } else if (ft >= FORMATMOD_HT_MF) {
-        mcs = mcs_index->ht.mcs;
-        nss = mcs_index->ht.nss;
-    } else {
-        mcs = mcs_index->legacy;
-        nss = 0;
-    }
-
-    len = print_rate(buf, size, ft, nss, mcs, bw, gi, pre, dcm, r_idx, bprint);
-    return len;
-}
-
-void idx_to_rate_cfg(int idx, union aml_rate_ctrl_info *r_cfg, int *ru_size)
-{
-    r_cfg->value = 0;
-    if (idx < N_CCK)
-    {
-        r_cfg->formatModTx = FORMATMOD_NON_HT;
-        r_cfg->giAndPreTypeTx = (idx & 1) << 1;
-        r_cfg->mcsIndexTx = idx / 2;
-    }
-    else if (idx < (N_CCK + N_OFDM))
-    {
-        r_cfg->formatModTx = FORMATMOD_NON_HT;
-        r_cfg->mcsIndexTx =  idx - N_CCK + 4;
-    }
-    else if (idx < (N_CCK + N_OFDM + N_HT))
-    {
-        union aml_mcs_index *r = (union aml_mcs_index *)r_cfg;
-
-        idx -= (N_CCK + N_OFDM);
-        r_cfg->formatModTx = FORMATMOD_HT_MF;
-        r->ht.nss = idx / (8*2*2);
-        r->ht.mcs = (idx % (8*2*2)) / (2*2);
-        r_cfg->bwTx = ((idx % (8*2*2)) % (2*2)) / 2;
-        r_cfg->giAndPreTypeTx = idx & 1;
-    }
-    else if (idx < (N_CCK + N_OFDM + N_HT + N_VHT))
-    {
-        union aml_mcs_index *r = (union aml_mcs_index *)r_cfg;
-
-        idx -= (N_CCK + N_OFDM + N_HT);
-        r_cfg->formatModTx = FORMATMOD_VHT;
-        r->vht.nss = idx / (10*4*2);
-        r->vht.mcs = (idx % (10*4*2)) / (4*2);
-        r_cfg->bwTx = ((idx % (10*4*2)) % (4*2)) / 2;
-        r_cfg->giAndPreTypeTx = idx & 1;
-    }
-    else if (idx < (N_CCK + N_OFDM + N_HT + N_VHT + N_HE_SU))
-    {
-        union aml_mcs_index *r = (union aml_mcs_index *)r_cfg;
-
-        idx -= (N_CCK + N_OFDM + N_HT + N_VHT);
-        r_cfg->formatModTx = FORMATMOD_HE_SU;
-        r->vht.nss = idx / (12*4*3);
-        r->vht.mcs = (idx % (12*4*3)) / (4*3);
-        r_cfg->bwTx = ((idx % (12*4*3)) % (4*3)) / 3;
-        r_cfg->giAndPreTypeTx = idx % 3;
-    }
-    else if (idx < (N_CCK + N_OFDM + N_HT + N_VHT + N_HE_SU + N_HE_MU))
-    {
-        union aml_mcs_index *r = (union aml_mcs_index *)r_cfg;
-
-        BUG_ON(ru_size == NULL);
-
-        idx -= (N_CCK + N_OFDM + N_HT + N_VHT + N_HE_SU);
-        r_cfg->formatModTx = FORMATMOD_HE_MU;
-        r->vht.nss = idx / (12*6*3);
-        r->vht.mcs = (idx % (12*6*3)) / (6*3);
-        *ru_size = ((idx % (12*6*3)) % (6*3)) / 3;
-        r_cfg->giAndPreTypeTx = idx % 3;
-        r_cfg->bwTx = 0;
-    }
-    else
-    {
-        union aml_mcs_index *r = (union aml_mcs_index *)r_cfg;
-
-        idx -= (N_CCK + N_OFDM + N_HT + N_VHT + N_HE_SU + N_HE_MU);
-        r_cfg->formatModTx = FORMATMOD_HE_ER;
-        r_cfg->bwTx = idx / 9;
-        if (ru_size)
-            *ru_size = idx / 9;
-        r_cfg->giAndPreTypeTx = idx % 3;
-        r->vht.mcs = (idx % 9) / 3;
-        r->vht.nss = 0;
-    }
-}
-#endif
-
 static struct aml_sta* aml_dbgfs_get_sta(struct aml_hw *aml_hw,
                                            char* mac_addr)
 {
@@ -1637,7 +1366,7 @@ static ssize_t aml_dbgfs_twt_request_read(struct file *file,
     sta = aml_dbgfs_get_sta(priv, (char *)file->f_path.dentry->d_parent->d_parent->d_iname);
     if (sta == NULL)
         return -EINVAL;
-    if (sta->twt_ind.sta_idx != AML_INVALID_STA)
+    if (sta->twt_ind.sta_idx != AML_STA_ID_UNKNOWN)
     {
         struct twt_conf_tag *conf = &sta->twt_ind.conf;
         if (sta->twt_ind.resp_type == MAC_TWT_SETUP_ACCEPT)
@@ -1698,21 +1427,30 @@ static ssize_t aml_dbgfs_twt_request_write(struct file *file,
     struct twt_setup_cfm twt_setup_cfm;
     struct aml_sta *sta = NULL;
     struct aml_hw *priv = file->private_data;
-    char buf[1024], param[30];
+    char *buf;
+    char param[30];
     char *line;
     int error = 1, i, val, setup_command = -1;
     bool_l found;
-    size_t len = sizeof(buf) - 1;
+    size_t buf_len = 1024;
+    size_t len = buf_len - 1;
 
     AML_DBG(AML_FN_ENTRY_STR);
+
+    buf = kzalloc(buf_len, GFP_KERNEL);
+    if (!buf) {
+        AML_ERR("kzalloc buf fail\n");
+        return -ENOMEM;
+    }
+
     /* Get the station index from MAC address */
     sta = aml_dbgfs_get_sta(priv, (char *)file->f_path.dentry->d_parent->d_parent->d_iname);
     if (sta == NULL)
-        return -EINVAL;
+        goto out;
 
     /* Get the content of the file */
     if (copy_from_user(buf, user_buf, len))
-        return -EFAULT;
+        goto out;
 
     buf[len] = '\0';
     memset(&twt_conf, 0, sizeof(twt_conf));
@@ -1721,7 +1459,7 @@ static ssize_t aml_dbgfs_twt_request_write(struct file *file,
     /* Get the content of the file */
     while (line != NULL)
     {
-        if (sscanf(line, "%s = %d", param, &val) == 2)
+        if (sscanf(line, "%29s = %d", param, &val) == 2)
         {
             i = 0;
             found = false;
@@ -1738,8 +1476,8 @@ static ssize_t aml_dbgfs_twt_request_write(struct file *file,
 
             if (!found)
             {
-                dev_err(priv->dev, "%s: parameter %s is not valid\n", __func__, param);
-                return -EINVAL;
+                AML_ERR("parameter %s is not valid\n", param);
+                goto out;
             }
 
             if (!strcmp(param, "setup_command"))
@@ -1769,8 +1507,8 @@ static ssize_t aml_dbgfs_twt_request_write(struct file *file,
         }
         else
         {
-            dev_err(priv->dev, "%s: Impossible to read TWT configuration option\n", __func__);
-            return -EFAULT;
+            AML_ERR("Impossible to read TWT configuration option\n");
+            goto out;
         }
         line = strchr(line, ',');
         if (line == NULL)
@@ -1780,19 +1518,21 @@ static ssize_t aml_dbgfs_twt_request_write(struct file *file,
 
     if (setup_command == -1)
     {
-        dev_err(priv->dev, "%s: TWT missing setup command\n", __func__);
-        return -EFAULT;
+        AML_ERR("TWT missing setup command\n");
+        goto out;
     }
 
     // Forward the request to the LMAC
     if ((error = aml_send_twt_request(priv, setup_command, sta->vif_idx,
                                        &twt_conf, &twt_setup_cfm)) != 0)
-        return error;
+        goto out;
 
     // Check the status
     if (twt_setup_cfm.status != CO_OK)
-        return -EIO;
+        goto out;
 
+out:
+    kfree(buf);
     return count;
 }
 DEBUGFS_READ_WRITE_FILE_OPS(twt_request);
@@ -1847,7 +1587,7 @@ static ssize_t aml_dbgfs_twt_teardown_write(struct file *file,
 
     if (sscanf(line, "flow_id = %d", (int *) &twt_teardown.id) != 1)
     {
-        dev_err(priv->dev, "%s: Invalid TWT configuration\n", __func__);
+        AML_ERR("Invalid TWT configuration\n");
         return -EINVAL;
     }
 
@@ -1874,13 +1614,7 @@ static ssize_t aml_dbgfs_rc_stats_read(struct file *file,
     struct aml_sta *sta = NULL;
     struct aml_hw *priv = file->private_data;
     char *buf;
-    int bufsz, len = 0;
     ssize_t read;
-    int i = 0;
-    int error = 0;
-    struct me_rc_stats_cfm me_rc_stats_cfm;
-    unsigned int no_samples;
-    struct st *st;
 
     AML_DBG(AML_FN_ENTRY_STR);
 
@@ -1893,117 +1627,13 @@ static ssize_t aml_dbgfs_rc_stats_read(struct file *file,
     if (sta == NULL)
         return -EINVAL;
 
-    /* Forward the information to the LMAC */
-    if ((error = aml_send_me_rc_stats(priv, sta->sta_idx, &me_rc_stats_cfm)))
-        return error;
+    buf = print_sta_rc_stats(priv, sta);
+    if (!buf)
+        return -ENOMEM;
 
-    no_samples = me_rc_stats_cfm.no_samples;
-    if (no_samples == 0)
-        return 0;
-
-    bufsz = no_samples * LINE_MAX_SZ + 500;
-
-    buf = kmalloc(bufsz + 1, GFP_ATOMIC);
-    if (buf == NULL)
-        return 0;
-
-    st = kmalloc(sizeof(struct st) * no_samples, GFP_ATOMIC);
-    if (st == NULL)
-    {
-        kfree(buf);
-        return 0;
-    }
-
-    for (i = 0; i < no_samples; i++)
-    {
-        unsigned int tp, eprob;
-        len = print_rate_from_cfg(st[i].line, LINE_MAX_SZ,
-                                  me_rc_stats_cfm.rate_stats[i].rate_config,
-                                  (int *)&st[i].r_idx, 0, 0);
-
-        if (me_rc_stats_cfm.sw_retry_step != 0)
-        {
-            len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len,  "%c",
-                    me_rc_stats_cfm.retry_step_idx[me_rc_stats_cfm.sw_retry_step] == i ? '*' : ' ');
-        }
-        else
-        {
-            len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len, " ");
-        }
-        len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len, "%c",
-                me_rc_stats_cfm.retry_step_idx[0] == i ? 'T' : ' ');
-        len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len, "%c",
-                me_rc_stats_cfm.retry_step_idx[1] == i ? 't' : ' ');
-        len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len, "%c ",
-                me_rc_stats_cfm.retry_step_idx[2] == i ? 'P' : ' ');
-
-        tp = me_rc_stats_cfm.tp[i] / 10;
-        len += scnprintf(&st[i].line[len], LINE_MAX_SZ - len, " %4u.%1u",
-                         tp / 10, tp % 10);
-
-        eprob = ((me_rc_stats_cfm.rate_stats[i].probability * 1000) >> 16) + 1;
-        scnprintf(&st[i].line[len],LINE_MAX_SZ - len,
-                         "  %4u.%1u %5u(%6u)  %6u",
-                         eprob / 10, eprob % 10,
-                         me_rc_stats_cfm.rate_stats[i].success,
-                         me_rc_stats_cfm.rate_stats[i].attempts,
-                         me_rc_stats_cfm.rate_stats[i].sample_skipped);
-    }
-    len = scnprintf(buf, bufsz ,
-                     "\nTX rate info for %02X:%02X:%02X:%02X:%02X:%02X:\n",
-                     sta->mac_addr[0], sta->mac_addr[1], sta->mac_addr[2],
-                     sta->mac_addr[3], sta->mac_addr[4], sta->mac_addr[5]);
-
-    len += scnprintf(&buf[len], bufsz - len,
-            "   # type               rate             tpt   eprob    ok(   tot)   skipped\n");
-
-    // add sorted statistics to the buffer
-    sort(st, no_samples, sizeof(st[0]), compare_idx, NULL);
-    for (i = 0; i < no_samples; i++)
-    {
-        len += scnprintf(&buf[len], bufsz - len, "%s\n", st[i].line);
-    }
-
-    // display HE TB statistics if any
-    if (me_rc_stats_cfm.rate_stats[RC_HE_STATS_IDX].rate_config != 0) {
-        unsigned int tp, eprob;
-        struct rc_rate_stats *rate_stats = &me_rc_stats_cfm.rate_stats[RC_HE_STATS_IDX];
-        int ru_index = rate_stats->ru_and_length & 0x07;
-        int ul_length = rate_stats->ru_and_length >> 3;
-
-        len += scnprintf(&buf[len], bufsz - len,
-                         "\nHE TB rate info:\n");
-
-        len += scnprintf(&buf[len], bufsz - len,
-                "     type               rate             tpt   eprob    ok(   tot)   ul_length\n     ");
-        len += print_rate_from_cfg(&buf[len], bufsz - len, rate_stats->rate_config,
-                                   NULL, ru_index, 0);
-
-        tp = me_rc_stats_cfm.tp[RC_HE_STATS_IDX] / 10;
-        len += scnprintf(&buf[len], bufsz - len, "      %4u.%1u",
-                         tp / 10, tp % 10);
-
-        eprob = ((rate_stats->probability * 1000) >> 16) + 1;
-        len += scnprintf(&buf[len],bufsz - len,
-                         "  %4u.%1u %5u(%6u)  %6u\n",
-                         eprob / 10, eprob % 10,
-                         rate_stats->success,
-                         rate_stats->attempts,
-                         ul_length);
-    }
-
-    len += scnprintf(&buf[len], bufsz - len, "\n MPDUs AMPDUs AvLen trialP");
-    len += scnprintf(&buf[len], bufsz - len, "\n%6u %6u %3d.%1d %6u\n",
-                     me_rc_stats_cfm.ampdu_len,
-                     me_rc_stats_cfm.ampdu_packets,
-                     me_rc_stats_cfm.avg_ampdu_len >> 16,
-                     ((me_rc_stats_cfm.avg_ampdu_len * 10) >> 16) % 10,
-                     me_rc_stats_cfm.sample_wait);
-
-    read = simple_read_from_buffer(user_buf, count, ppos, buf, len);
+    read = simple_read_from_buffer(user_buf, count, ppos, buf, strlen(buf));
 
     kfree(buf);
-    kfree(st);
 
     return read;
 }
@@ -2070,14 +1700,7 @@ static ssize_t aml_dbgfs_last_rx_read(struct file *file,
 #ifdef CONFIG_AML_DEBUGFS
     struct aml_sta *sta = NULL;
     struct aml_hw *priv = file->private_data;
-    struct aml_rx_rate_stats *rate_stats;
     char *buf;
-    int bufsz, i, len = 0;
-    unsigned int fmt, pre, bw, nss, mcs, gi, dcm = 0;
-    struct rx_vector_1 *last_rx;
-    char hist[] = "##################################################";
-    int hist_len = sizeof(hist) - 1;
-    u8 nrx;
 
     AML_DBG(AML_FN_ENTRY_STR);
 
@@ -2090,100 +1713,11 @@ static ssize_t aml_dbgfs_last_rx_read(struct file *file,
     if (sta == NULL)
         return -EINVAL;
 
-    rate_stats = &sta->stats.rx_rate;
-    bufsz = (rate_stats->rate_cnt * ( 50 + hist_len) + 200);
-    buf = kmalloc(bufsz + 1, GFP_ATOMIC);
+    buf = print_sta_rate_stats(priv, sta);
     if (buf == NULL)
         return 0;
 
-    // Get number of RX paths
-    nrx = (priv->version_cfm.version_phy_1 & MDM_NRX_MASK) >> MDM_NRX_LSB;
-
-    len += scnprintf(buf, bufsz,
-                     "\nRX rate info for %02X:%02X:%02X:%02X:%02X:%02X:\n",
-                     sta->mac_addr[0], sta->mac_addr[1], sta->mac_addr[2],
-                     sta->mac_addr[3], sta->mac_addr[4], sta->mac_addr[5]);
-
-    // Display Statistics
-    for (i = 0; i < rate_stats->size; i++)
-    {
-        if (rate_stats->table && rate_stats->table[i]) {
-            union aml_rate_ctrl_info rate_config;
-            u64 percent = div_u64(rate_stats->table[i] * 1000, rate_stats->cpt);
-            u64 p;
-            int ru_size;
-            u32 rem;
-
-            idx_to_rate_cfg(i, &rate_config, &ru_size);
-            len += print_rate_from_cfg(&buf[len], bufsz - len,
-                                       rate_config.value, NULL, ru_size, 0);
-            p = div_u64((percent * hist_len), 1000);
-            len += scnprintf(&buf[len], bufsz - len, ": %9d(%2d.%1d%%)%.*s\n",
-                             rate_stats->table[i],
-                             div_u64_rem(percent, 10, &rem), rem, p, hist);
-        }
-    }
-
-    // Display detailed info of the last received rate
-    last_rx = &sta->stats.last_rx.rx_vect1;
-    len += scnprintf(&buf[len], bufsz - len,"\nLast received rate\n"
-                     "type               rate     LDPC STBC BEAMFM DCM DOPPLER %s\n",
-                     (nrx > 1) ? "rssi1(dBm) rssi2(dBm)" : "rssi(dBm)");
-
-    fmt = last_rx->format_mod;
-    bw = last_rx->ch_bw;
-    pre = last_rx->pre_type;
-    if (fmt >= FORMATMOD_HE_SU) {
-        mcs = last_rx->he.mcs;
-        nss = last_rx->he.nss;
-        gi = last_rx->he.gi_type;
-        if ((fmt == FORMATMOD_HE_MU) || (fmt == FORMATMOD_HE_ER))
-            bw = last_rx->he.ru_size;
-        dcm = last_rx->he.dcm;
-    } else if (fmt == FORMATMOD_VHT) {
-        mcs = last_rx->vht.mcs;
-        nss = last_rx->vht.nss;
-        gi = last_rx->vht.short_gi;
-    } else if (fmt >= FORMATMOD_HT_MF) {
-        mcs = last_rx->ht.mcs % 8;
-        nss = last_rx->ht.mcs / 8;;
-        gi = last_rx->ht.short_gi;
-    } else {
-        BUG_ON((mcs = legrates_lut[last_rx->leg_rate].idx) == -1);
-        nss = 0;
-        gi = 0;
-    }
-
-    len += print_rate(&buf[len], bufsz - len, fmt, nss, mcs, bw, gi, pre, dcm, NULL, 0);
-
-    /* flags for HT/VHT/HE */
-    if (fmt >= FORMATMOD_HE_SU) {
-        len += scnprintf(&buf[len], bufsz - len, "  %c    %c     %c    %c     %c",
-                         last_rx->he.fec ? 'L' : ' ',
-                         last_rx->he.stbc ? 'S' : ' ',
-                         last_rx->he.beamformed ? 'B' : ' ',
-                         last_rx->he.dcm ? 'D' : ' ',
-                         last_rx->he.doppler ? 'D' : ' ');
-    } else if (fmt == FORMATMOD_VHT) {
-        len += scnprintf(&buf[len], bufsz - len, "  %c    %c     %c           ",
-                         last_rx->vht.fec ? 'L' : ' ',
-                         last_rx->vht.stbc ? 'S' : ' ',
-                         last_rx->vht.beamformed ? 'B' : ' ');
-    } else if (fmt >= FORMATMOD_HT_MF) {
-        len += scnprintf(&buf[len], bufsz - len, "  %c    %c                  ",
-                         last_rx->ht.fec ? 'L' : ' ',
-                         last_rx->ht.stbc ? 'S' : ' ');
-    } else {
-        len += scnprintf(&buf[len], bufsz - len, "                         ");
-    }
-    if (nrx > 1) {
-        len += scnprintf(&buf[len], bufsz - len, "       %-4d       %d\n",
-                         last_rx->rssi1, last_rx->rssi1);
-    } else {
-        len += scnprintf(&buf[len], bufsz - len, "      %d\n", last_rx->rssi1);
-    }
-
-    read = simple_read_from_buffer(user_buf, count, ppos, buf, len);
+    read = simple_read_from_buffer(user_buf, count, ppos, buf, strlen(buf));
 
     kfree(buf);
 #endif
@@ -2237,7 +1771,7 @@ void aml_fw_trace_dump(struct aml_hw *aml_hw)
     if (!aml_hw->debugfs.fw_trace.buf.data)
         return;
 
-    _aml_fw_trace_dump(aml_hw, &aml_hw->debugfs.fw_trace.buf);
+    _aml_fw_trace_dump(&aml_hw->debugfs.fw_trace.buf);
 }
 
 void aml_fw_trace_reset(struct aml_hw *aml_hw)
@@ -2251,10 +1785,6 @@ void aml_dbgfs_trigger_fw_dump(struct aml_hw *aml_hw, char *reason)
 }
 
 #ifdef CONFIG_AML_FULLMAC
-extern struct aml_rx_rate_stats gst_rx_rate;
-extern struct aml_dyn_snr_cfg g_dyn_snr;
-
-extern struct aml_vif *aml_rx_get_vif(struct aml_hw *aml_hw, int vif_idx);
 static void _aml_dbgfs_register_sta(struct aml_debugfs *aml_debugfs, struct aml_sta *sta)
 {
     struct aml_hw *aml_hw = container_of(aml_debugfs, struct aml_hw, debugfs);
@@ -2262,11 +1792,7 @@ static void _aml_dbgfs_register_sta(struct aml_debugfs *aml_debugfs, struct aml_
     char sta_name[18];
     struct dentry *dir_rc;
     struct dentry *file;
-    struct aml_rx_rate_stats *rate_stats = &sta->stats.rx_rate;
-    int nb_rx_rate = N_CCK + N_OFDM;
     struct aml_rc_config_save *rc_cfg, *next;
-    struct aml_vif * vif;
-    u32 snr_cfg = 0;
 
     if (sta->sta_idx >= NX_REMOTE_STA_MAX) {
         scnprintf(sta_name, sizeof(sta_name), "bc_mc");
@@ -2297,41 +1823,6 @@ static void _aml_dbgfs_register_sta(struct aml_debugfs *aml_debugfs, struct aml_
                                &aml_dbgfs_last_rx_ops);
     if (IS_ERR_OR_NULL(file))
         goto error_after_dir;
-
-    if (aml_hw->mod_params->ht_on)
-        nb_rx_rate += N_HT;
-
-    if (aml_hw->mod_params->vht_on)
-        nb_rx_rate += N_VHT;
-
-    if (aml_hw->mod_params->he_on)
-        nb_rx_rate += N_HE_SU + N_HE_MU + N_HE_ER;
-
-    rate_stats->table = kzalloc(nb_rx_rate * sizeof(rate_stats->table[0]),
-                                GFP_KERNEL);
-    if (!rate_stats->table)
-        goto error_after_dir;
-    vif = aml_rx_get_vif(aml_hw, sta->vif_idx);
-    if (gst_rx_rate.table == NULL && vif && (vif->is_sta_mode)) {
-        gst_rx_rate.table = kzalloc(nb_rx_rate * sizeof(rate_stats->table[0]),
-                                    GFP_KERNEL);
-        if (!gst_rx_rate.table)
-            goto error_after_dir;
-        gst_rx_rate.size = nb_rx_rate;
-        gst_rx_rate.cpt = 0;
-        gst_rx_rate.rate_cnt = 0;
-
-        memset(&g_dyn_snr, 0, sizeof(struct aml_dyn_snr_cfg));
-        g_dyn_snr.enable = 1;
-        g_dyn_snr.snr_mcs_ration = 90;
-        snr_cfg = AML_REG_READ(aml_hw->plat, AML_ADDR_SYSTEM, 0xc00828);
-        snr_cfg &= ~ (BIT(29)|BIT(30));
-        AML_REG_WRITE(snr_cfg, aml_hw->plat, AML_ADDR_SYSTEM, 0xc00828);
-    }
-
-    rate_stats->size = nb_rx_rate;
-    rate_stats->cpt = 0;
-    rate_stats->rate_cnt = 0;
 
     /* By default enable rate controller */
     aml_debugfs->rc_config[sta->sta_idx] = -1;
@@ -2377,7 +1868,7 @@ static void _aml_dbgfs_register_sta(struct aml_debugfs *aml_debugfs, struct aml_
         if (IS_ERR_OR_NULL(file))
             goto error_after_dir;
 
-        sta->twt_ind.sta_idx = AML_INVALID_STA;
+        sta->twt_ind.sta_idx = AML_STA_ID_UNKNOWN;
     }
     return;
 
@@ -2387,41 +1878,13 @@ error_after_dir:
     aml_debugfs->dir_rc_sta[sta->sta_idx] = NULL;
     aml_debugfs->dir_twt_sta[sta->sta_idx] = NULL;
 
-    if (sta->stats.rx_rate.table) {
-        kfree(sta->stats.rx_rate.table);
-        sta->stats.rx_rate.table = NULL;
-    }
-    vif = aml_rx_get_vif(aml_hw, sta->vif_idx);
-    if (gst_rx_rate.table && vif && vif->is_sta_mode) {
-        kfree(gst_rx_rate.table);
-        gst_rx_rate.table = NULL;
-    }
-
 error:
-    dev_err(aml_hw->dev,
-        "Error while registering debug entry for sta %d\n", sta->sta_idx);
+    AML_ERR("Error while registering debug entry for sta %d\n", sta->sta_idx);
 }
 
 static void _aml_dbgfs_unregister_sta(struct aml_debugfs *aml_debugfs, struct aml_sta *sta)
 {
-    struct aml_hw *aml_hw = container_of(aml_debugfs, struct aml_hw, debugfs);
-    struct aml_vif * vif;
-
     debugfs_remove_recursive(aml_debugfs->dir_sta[sta->sta_idx]);
-    /* unregister the sta */
-    if (sta->stats.rx_rate.table) {
-        kfree(sta->stats.rx_rate.table);
-        sta->stats.rx_rate.table = NULL;
-    }
-    vif = aml_rx_get_vif(aml_hw, sta->vif_idx);
-    if (gst_rx_rate.table && vif && vif->is_sta_mode) {
-        kfree(gst_rx_rate.table);
-        gst_rx_rate.table = NULL;
-    }
-
-    sta->stats.rx_rate.size = 0;
-    sta->stats.rx_rate.cpt  = 0;
-    sta->stats.rx_rate.rate_cnt = 0;
 
     /* If fix rate was set for this station, save the configuration in case
        we reconnect to this station within RC_CONFIG_DUR msec */
@@ -2440,7 +1903,7 @@ static void _aml_dbgfs_unregister_sta(struct aml_debugfs *aml_debugfs, struct am
     aml_debugfs->dir_sta[sta->sta_idx] = NULL;
     aml_debugfs->dir_rc_sta[sta->sta_idx] = NULL;
     aml_debugfs->dir_twt_sta[sta->sta_idx] = NULL;
-    sta->twt_ind.sta_idx = AML_INVALID_STA;
+    sta->twt_ind.sta_idx = AML_STA_ID_UNKNOWN;
 }
 
 static void aml_sta_work(struct work_struct *ws)
@@ -2452,14 +1915,14 @@ static void aml_sta_work(struct work_struct *ws)
 
     sta_idx = aml_debugfs->sta_idx;
     if (sta_idx >= (NX_REMOTE_STA_MAX + NX_VIRT_DEV_MAX)) {
-        WARN(1, "Invalid sta index %d", sta_idx);
+        AML_ERR("Invalid sta index %d", sta_idx);
         return;
     }
 
-    aml_debugfs->sta_idx = AML_INVALID_STA;
+    aml_debugfs->sta_idx = AML_STA_ID_UNKNOWN;
     sta = aml_hw->sta_table + sta_idx;
     if (!sta) {
-        WARN(1, "Invalid sta %d", sta_idx);
+        AML_ERR("Invalid sta index %d", sta_idx);
         return;
     }
 
@@ -2551,7 +2014,7 @@ int aml_dbgfs_register(struct aml_hw *aml_hw, const char *name)
 #ifdef CONFIG_AML_FULLMAC
     INIT_WORK(&aml_debugfs->sta_work, aml_sta_work);
     INIT_LIST_HEAD(&aml_debugfs->rc_config_save);
-    aml_debugfs->sta_idx = AML_INVALID_STA;
+    aml_debugfs->sta_idx = AML_STA_ID_UNKNOWN;
 #endif
 
     DEBUGFS_ADD_U32(tcp_pacing_shift, dir_drv, &aml_hw->tcp_pacing_shift,

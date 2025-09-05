@@ -1,3 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
 #ifndef __AML_IWPRIV_CMD_H
 #define __AML_IWPRIV_CMD_H
 #include <net/iw_handler.h>
@@ -48,7 +55,7 @@ enum aml_iwpriv_subcmd
     AML_IWP_SET_STBC = 38,
     AML_IWP_GET_STBC = 39,
     AML_IWP_PCIE_TEST = 40,
-    AML_COEX_CMD = 41,
+    AML_IWP_SET_COEX_MODE = 41,
     AML_LA_DUMP = 42,
     AML_IWP_SET_PT_CALIBRATION = 43,
     AML_IWP_GET_CHAN_LIST = 44,
@@ -150,13 +157,42 @@ enum aml_iwpriv_subcmd
     AML_IWP_SET_CSI_RUNTIME = 143,
     AML_IWP_USB_TRACE_ENABLE = 144,
     AML_IWP_GET_CSI_LINK_INFO = 145,
-    AML_IWP_CLEAR_STATS = 146,
     AML_IWP_SUSPEND_TRACE_ENABLE = 147,
     AML_IWP_SET_CCA_TIMER = 148,
+#ifdef CONFIG_AML_NAN_SUPPORT
+    AML_IWP_CANCEL_NAN_SVC_REQ = 149,
+    AML_IWP_NAN_DISABLE = 150,
+#endif
+    AML_IWP_SET_WMM_IE = 151,
+    AML_IWP_SEND_ACTION_REQ = 152,
+    AML_IWP_SET_BR_GAIN_IDX = 153,
+    AML_IWP_GET_BR_GAIN_IDX = 154,
+    AML_IWP_SET_AGG_TX = 155,
+    AML_IWP_SET_AGG_RX = 156,
+    AML_IWP_GET_AGG = 157,
+#ifdef CONFIG_AML_APF
+    AML_IWP_GET_APF_CAPABILITIES = 158,
+    AML_IWP_ADD_APF_PROGRAM = 159,
+    AML_IWP_DEL_APF_PROGRAM = 160,
+    AML_IWP_GET_APF_STATUS = 161,
+    AML_IWP_SET_APF_MAC_ADDR = 162,
+#endif
+    AML_IWP_LEGACY_SET_REG = 163,
+    AML_IWP_LEGACY_SET_RF_REG = 164,
+    AML_IWP_PT_SET_LOW_POWER_FLAG = 165,
+    AML_IWP_GET_RF_LOW_POWER_FALG = 166,
+    AML_IWP_GET_TEMP = 167,
+    AML_IWP_SET_PROT_TYPE = 168,
+    AML_IWP_GET_WIFI_INFO = 169,
+    AML_IWP_PT_SEC_TEST  = 170,
+    AML_IWP_CLOSE_SOCKET = 171,
+    AML_IWP_SET_RX_BW_NSS = 172,
+    AML_IWP_SET_REGDOM_EN = 173,
 };
 
 #define IW_PRIV_INT_SIZE_MASK   0x01FF
 
 int aml_is_valid_mac_addr(const char* mac, int byte_length);
+int aml_dump_mem(struct aml_hw *aml_hw, int addr, int size);
 
 #endif

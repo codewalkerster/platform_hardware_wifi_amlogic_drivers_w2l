@@ -1,3 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+* Copyright (C) 202X Original Author (retain original author information)
+* Copyright (C) 202X Amlogic, Inc. All rights reserved.
+*
+* Description:
+*/
 #ifndef _FI_W2_SDIO_H
 #define _FI_W2_SDIO_H
 
@@ -63,10 +70,6 @@
 #define SDIO_LA_PAGE_NUM  42
 #define USB_WRITE_SRAM_LEN 480
 #define USB_TX_ADDRESSTABLE_NUM  TX_PAGE_NUM_SMALL/2
-
-//When setting bit4 to 1, enable auto tx of func4, otherwise disable
-#define RG_SCFG_FUNC1_AUTO_TX  0x8181
-
 
 #define WIFI_SDIO_IF    (0xa05000)
 
