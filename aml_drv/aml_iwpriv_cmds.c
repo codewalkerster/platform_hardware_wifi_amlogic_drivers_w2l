@@ -2114,7 +2114,10 @@ static int aml_set_max_drop_num(struct net_device *dev, int num)
 
     if (num < 0)
     {
-        num = MAX_DROP_TCP_ACK_CNT;
+        if (aml_bus_type == SDIO_MODE)
+            num = SDIO_MAX_DROP_TCP_ACK_CNT;
+        else
+            num = USB_MAX_DROP_TCP_ACK_CNT;
         atomic_set(&ack_mgr->max_drop_cnt, num);
         atomic_set(&ack_mgr->dynamic_adjust, 1);
     }

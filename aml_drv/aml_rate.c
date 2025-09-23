@@ -765,8 +765,11 @@ void aml_rx_sta_stats(struct aml_hw *aml_hw, struct aml_sta *sta, struct hw_vect
  * Dynamic SNR functions
  */
 #define SNR_CFG_REG     (0x60c00828 - AML_BASE_ADDR)
-#define SNR_CFG_MASK    0x3U
-#define SNR_CFG_SHIFT   29
+#define SNR_CFG_MASK    0x7U
+#define SNR_CFG_SHIFT   28
+#define SNR_CFG_DEFAULT 1
+#define SNR_CFG_MIN     1
+#define SNR_CFG_MAX     5
 
 #define SNR_TRIAL_MAX   3
 
@@ -794,6 +797,7 @@ struct aml_dyn_snr {
     bool need_trial;
     u8 cur_snr_cfg;
     u8 trial_cnt;
+    u8 upsampling;
     u8 snr_cfg[SNR_TRIAL_MAX];
     unsigned int rx_tp[SNR_TRIAL_MAX];
 
@@ -854,8 +858,8 @@ static void aml_hi_rate_bmp_flush(unsigned long *bmp, enum nl80211_band band)
         case FORMATMOD_HE_MU:
             if ((r->he.nss >= 1) && (r->he.mcs > 10))
                 set_bit(i, bmp);
-            else if (band == NL80211_BAND_2GHZ && (r->he.nss >= 1) && (r->he.mcs > 8))
-                /* W2L 2.4G doesn't support MCS10/11, for convenient, relax W2 too */
+            else if (band == NL80211_BAND_5GHZ && (r->he.nss >= 1) && (r->he.mcs > 8))
+                /* W2L 5G doesn't support MCS10/11, for convenient, relax W2 too */
                 set_bit(i, bmp);
             else
                 clear_bit(i, bmp);
@@ -882,12 +886,28 @@ static void aml_dynamic_snr_rate_stats(struct aml_dyn_snr *dyn_snr, struct hw_ve
         AML_RLMT_WARN("hw rate index %d is out of range %d!\n", rate_idx, dyn_snr->rate_num);
 }
 
+static inline int aml_get_rssi_delta(struct aml_hw *aml_hw)
+{
+    struct aml_plat *aml_plat = aml_hw->plat;
+    u32 rssi_indivaul = AML_REG_READ(aml_plat, AML_ADDR_MAC_PHY, REG_OF_SYNC_TWO_RSSI);
+    int rssi_delta = 0;
+
+    int wf0 = ((rssi_indivaul & 0x0000ff00) >> 8) - 256;
+    int wf1 = (rssi_indivaul & 0x000000ff) - 256;
+
+    rssi_delta = (wf0 > wf1) ? (wf0 - wf1) : (wf1 - wf0);
+    AML_DBG("rssi_delta: %d dbm, (wf0: %d dbm, wf1: %d dbm) \n", rssi_delta, wf0, wf1);
+
+    return rssi_delta;
+}
+
 static inline void aml_dynamic_snr_probe(struct aml_dyn_snr *dyn_snr, struct aml_hw *aml_hw)
 {
     int i;
     int hi_rate_pkts = 0;
     u32 high_rate_permillage = 0;
     unsigned int mbps;
+    u32 bcn_rssi = (AML_REG_READ(aml_hw->plat, AML_ADDR_MAC_PHY, REG_OF_SYNC_RSSI) & 0xffff) - 256;
 
     /* save recent stats and clear it */
     spin_lock_bh(&dyn_snr->lock);
@@ -909,6 +929,14 @@ static inline void aml_dynamic_snr_probe(struct aml_dyn_snr *dyn_snr, struct aml
     if (mbps < 30) {
         dyn_snr->need_trial = false;
         dyn_snr->trial_cnt = 0;
+        return;
+    }
+    if (bcn_rssi < -48) {
+        AML_DBG("RSSI IS LOW, DISABLE DYNAMIC SNR\n");
+        dyn_snr->need_trial = false;
+        dyn_snr->trial_cnt = 0;
+        aml_dynamic_snr_set(aml_hw, SNR_CFG_DEFAULT);
+        dyn_snr->cur_snr_cfg = SNR_CFG_DEFAULT;
         return;
     }
 
@@ -935,37 +963,46 @@ static inline void aml_dynamic_snr_probe(struct aml_dyn_snr *dyn_snr, struct aml
         switch (trial_cnt) {
         case 0:
             dyn_snr->need_trial = true;    /* fast / short duration */
+            /*Adjust one gear each time to reduce throughput fluctuation*/
+            if (snr_cfg == SNR_CFG_MIN) {
+                snr_cfg = (snr_cfg + 1) & SNR_CFG_MASK;
 
-            /* try 2 more times: last_snr_cfg + 1, last_snr_cfg - 1 */
-            snr_cfg = (snr_cfg + 1) & SNR_CFG_MASK;
+            } else if (snr_cfg == SNR_CFG_MAX) {
+                snr_cfg = (snr_cfg - 1) & SNR_CFG_MASK;
+
+            } else if (snr_cfg > SNR_CFG_MIN && snr_cfg < SNR_CFG_MAX) {
+                if (dyn_snr->upsampling)
+                    snr_cfg = (snr_cfg + 1) & SNR_CFG_MASK;
+                else
+                  snr_cfg = (snr_cfg - 1) & SNR_CFG_MASK;
+            }
             trial_cnt = 1;
             break;
         case 1:
-            snr_cfg = (snr_cfg - 1) & SNR_CFG_MASK;
-            trial_cnt = 2;
-            break;
-        case 2: {
-            unsigned int best_tp = 0;
-
-            // find the best and save it into rank 0
-            for (i = 0; i < SNR_TRIAL_MAX; i++) {
-                if (dyn_snr->rx_tp[i] > best_tp) {
-                    best_tp = dyn_snr->rx_tp[i];
-                    snr_cfg = dyn_snr->snr_cfg[i];
+            if (snr_cfg < SNR_CFG_MIN || snr_cfg > SNR_CFG_MAX) {
+                snr_cfg = SNR_CFG_DEFAULT;
+                dyn_snr->upsampling = 0;
+            }
+            else {
+                if (dyn_snr->rx_tp[0] > dyn_snr->rx_tp[1] && dyn_snr->snr_cfg[0] > dyn_snr->snr_cfg[1]) {
+                    dyn_snr->upsampling = 1;
+                } else {
+                    dyn_snr->upsampling = 0;
                 }
+                snr_cfg = dyn_snr->rx_tp[0] > dyn_snr->rx_tp[1] ? dyn_snr->snr_cfg[0] : dyn_snr->snr_cfg[1];
             }
             dyn_snr->need_trial = false;
             trial_cnt = 0;
             break;
-            }
+
         default:
             AML_ERR("wrong trial_cnt %d\n", trial_cnt);
             BUG_ON(trial_cnt >= SNR_TRIAL_MAX);
             break;
         }
+
         dyn_snr->trial_cnt = trial_cnt;
         dyn_snr->snr_cfg[trial_cnt] = snr_cfg;
-
         if (dyn_snr->cur_snr_cfg != snr_cfg) {
             aml_dynamic_snr_set(aml_hw, snr_cfg);
             dyn_snr->cur_snr_cfg = snr_cfg;
@@ -982,9 +1019,9 @@ static void aml_dynamic_snr_work(struct work_struct *work)
         int is_interruptible;
 
         if (!dyn_snr->cfg.enable || dyn_snr->need_trial) {
-            is_interruptible = msleep_interruptible(100);
+            is_interruptible = msleep_interruptible(500);
         } else {
-            is_interruptible = msleep_interruptible(3000);
+            is_interruptible = msleep_interruptible(2000);
         }
 
         if (is_interruptible) {
@@ -1007,7 +1044,7 @@ int aml_dynamic_snr_config(struct aml_hw *aml_hw, int enable, int snr_cfg_or_mcs
     if ((dyn_snr->cfg.enable = enable)) {
         dyn_snr->cfg.permillage = snr_cfg_or_mcs_ration * 10;
         dyn_snr->need_trial = true;
-        dyn_snr->cur_snr_cfg = 0;
+        dyn_snr->cur_snr_cfg = SNR_CFG_DEFAULT;
     } else {
         dyn_snr->cur_snr_cfg = snr_cfg_or_mcs_ration & SNR_CFG_MASK;
     }

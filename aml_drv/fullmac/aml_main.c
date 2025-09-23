@@ -8951,7 +8951,7 @@ unsigned char *aml_get_fw_info(unsigned int *info_len)
     unsigned char *kmalloc_buf = NULL;
 
     kmalloc_buf = (unsigned char *)aml_mem_prealloc(PREALLOC_BUF_FW_DL, 100);
-    kmalloc_buf += (2 * WIFI_SUSPEND_CODE_LEN) + (HOST_CMD_SIZE_LONG + (HOST_CMD_COUNT - 1) * HOST_CMD_SIZE) + 4;
+    kmalloc_buf += (2 * WIFI_SUSPEND_CODE_LEN) + (HOST_CMD_SIZE_LONG * 2 + (HOST_CMD_COUNT - 2) * HOST_CMD_SIZE) + 4;
 
     *info_len = *(unsigned int *)kmalloc_buf;
 
